@@ -3,11 +3,16 @@ const cv = document.getElementById('c') as HTMLCanvasElement;
 const ctx = cv.getContext('2d')!;
 const N = 10, ANTE = 50, SPAWN = 0.5, POWER_HOLD = 15, REWARD = 10, WIN_BONUS = 100;
 let W = 0, H = 0, cs = 0, ox = 0, oy = 0, rackY = 0, dpr = 1;
-type Seat = { r: number; c: number; age: number; id: number; power: boolean; hold: number; ang: number; on: boolean; srcConn: boolean; earned: boolean; lvl: number };
+type Seat = { r: number; c: number; age: number; id: number; power: boolean; hold: number; ang: number; on: boolean; srcConn: boolean; earned: boolean; lvl: number; dir: number; jam: boolean };
 type Gear = { id: number; x: number; y: number; vx: number; vy: number; ang: number; va: number; power: boolean; phase: 'rack' | 'fall'; dir: number; dropX: number; stuck: number; earned: boolean; dead?: boolean; skip?: string; skipT?: number };
-type Mill = { r: number; c: number; upperDone: boolean; born: number };
+type Mill = { r: number; c: number; upperDone: boolean; born: number; dir: number };
 let pins: boolean[][], edge: Map<string, boolean>, seats: Map<string, Seat>, gears: Gear[], wms: Mill[];
 let mill = { r: 0, c: 0 };
+let postDir = new Map<string, number>(), jamLinks: [string, string][] = [], jamSides = new Set<string>(), postAng = 0;
+type Spark = { x: number; y: number; vx: number; vy: number; t: number; col: string };
+let sparks: Spark[] = [];
+const SPARK_COLS = ['#ffffff', '#fff27a', '#ffd23a', '#ff9a1f'];
+function emit(x: number, y: number, n: number) { for (let i = 0; i < n; i++) { const a = rnd(0, Math.PI * 2), v = rnd(0.8, 3.5) * cs; sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - cs, t: rnd(0.15, 0.45), col: SPARK_COLS[ri(0, 3)] }); } }
 let detached = 0, anteLeft = 0, queue = 0, bin = 0, credit = 0, spawned = 0, lost = 0, reclaims = 0, nextId = 1;
 let spawnT = 0, score = 0, time = 0, over = false, won = false, playing = false, flash = 0, wmAng = 0, millAng = 0, millSpin = 0, toast = '', toastT = 0;
 let best = +(localStorage.getItem('gearmill.best') || 0);
@@ -33,7 +38,14 @@ const isWm = (r: number, c: number) => wms.some(w => w.r === r && w.c === c);
 const isMill = (r: number, c: number) => r === mill.r && c === mill.c;
 const locked = (r: number, c: number) => isWm(r, c) || isMill(r, c);
 const pinUp = (r: number, c: number) => inG(r, c) ? pins[r][c] : !!edge.get(r + ',' + c);
-const raised = (r: number, c: number) => DIRS.every(([dr, dc]) => pinUp(r + dr, c + dc));
+const pinRaised = (r: number, c: number) => DIRS.every(([dr, dc]) => pinUp(r + dr, c + dc));
+const postDown = (r: number, c: number) => edge.get(K(r, c)) === false;
+// ROW RAISE: two adjacent border posts down on a side lift the rows/columns beside them
+const pairDown = (a: [number, number], b1: [number, number], b2: [number, number]) => postDown(...a) && (postDown(...b1) || postDown(...b2));
+const forced = (r: number, c: number) =>
+  pairDown([r, -1], [r - 1, -1], [r + 1, -1]) || pairDown([r, N], [r - 1, N], [r + 1, N]) ||
+  pairDown([-1, c], [-1, c - 1], [-1, c + 1]) || pairDown([N, c], [N, c - 1], [N, c + 1]);
+const raised = (r: number, c: number) => pinRaised(r, c) || forced(r, c);
 const pinsUpCount = () => pins.flat().filter(Boolean).length + [...edge.values()].filter(Boolean).length;
 const cx = (c: number) => ox + (c + 0.5) * cs, cy = (r: number) => oy + (r + 0.5) * cs;
 // edge posts sit just outside the grid, at the virtual neighbour position (half a cell out so they fit on screen)
@@ -45,7 +57,7 @@ function freeSquare(avoid: (r: number, c: number) => boolean) {
   for (let t = 0; t < 200; t++) { const r = ri(0, N - 1), c = ri(0, N - 1); if (!locked(r, c) && !seatAt(r, c) && !avoid(r, c)) return { r, c }; }
   return null;
 }
-function addWindmill(r: number, c: number) { wms.push({ r, c, upperDone: false, born: time }); pins[r][c] = true; }
+function addWindmill(r: number, c: number) { wms.push({ r, c, upperDone: false, born: time, dir: Math.random() < 0.5 ? 1 : -1 }); pins[r][c] = true; }
 function reset() {
   pins = Array.from({ length: N }, () => Array(N).fill(false));
   edge = new Map(edgeKeys().map(([r, c]) => [r + ',' + c, true]));
@@ -72,7 +84,7 @@ function tap(px: number, py: number) {
   // border post: nearest edge post within ~0.6 cell
   let bestK: [number, number] | null = null, bd = cs * 0.6;
   for (const [er, ec] of edgeKeys()) { const d = Math.hypot(px - ex(ec), py - ey(er)); if (d < bd) { bd = d; bestK = [er, ec]; } }
-  if (bestK) { const k = bestK.join(','); edge.set(k, !edge.get(k)); if (!edge.get(k)) releaseSeat(bestK[0], bestK[1]); }
+  if (bestK) { const k = bestK.join(','); if (seatAt(bestK[0], bestK[1])) { releaseSeat(bestK[0], bestK[1]); return; } edge.set(k, !edge.get(k)); }
 }
 cv.addEventListener('pointerdown', e => { const b = cv.getBoundingClientRect(); tap(e.clientX - b.left, e.clientY - b.top); });
 
@@ -108,27 +120,66 @@ function bfs(starts: string[]) {
     for (const [dr, dc] of DIRS) { const k = `${r + dr},${c + dc},${l}`; if (!seen.has(k) && nodeAt(r + dr, c + dc, l)) { seen.add(k); q.push(k); } } }
   return seen;
 }
+const sideOf = (r: number, c: number) => r < 0 ? 'T' : r >= N ? 'B' : c < 0 ? 'L' : c >= N ? 'R' : '';
+const sideIdx = (r: number, c: number) => (r < 0 || r >= N) ? c : r;
+const sideKey = (sd: string, i: number) => sd === 'T' ? K(-1, i) : sd === 'B' ? K(N, i) : sd === 'L' ? K(i, -1) : K(i, N);
+const nbrs = (k: string) => { const [r, c, l] = k.split(',').map(Number); return DIRS.map(([dr, dc]) => [r + dr, c + dc, l]).filter(([a, b, l2]) => nodeAt(a, b, l2)).map(v => v.join(',')); };
+// direction solve: multi-driver BFS 2-colouring; any component with a conflict jams
+function solve(drivers: Map<string, number>) {
+  const dir = new Map(drivers), q = [...drivers.keys()], conflicts: [string, string][] = [];
+  while (q.length) { const u = q.shift()!; for (const v of nbrs(u)) { if (!dir.has(v)) { dir.set(v, -dir.get(u)!); q.push(v); } else if (dir.get(v) === dir.get(u)) conflicts.push([u, v]); } }
+  const jam = new Set<string>();
+  for (const [u] of conflicts) { if (jam.has(u)) continue; const st = [u]; jam.add(u); while (st.length) { const x = st.pop()!; for (const y of nbrs(x)) if (!jam.has(y)) { jam.add(y); st.push(y); } } }
+  return { dir, jam, conflicts };
+}
 function power() {
-  const wmStarts = wms.flatMap(w => [`${w.r},${w.c},0`, `${w.r},${w.c},1`]);
-  const fromWm = bfs(wmStarts);
-  const srcs = [...wmStarts];
-  for (const s of seats.values()) { const { r, c } = s;
-    s.srcConn = fromWm.has(`${r},${c},${s.lvl}`); if (s.power && s.srcConn) s.hold = POWER_HOLD; if (s.power && s.hold > 0) srcs.push(`${r},${c},${s.lvl}`); }
-  const live = bfs(srcs);
+  const base = new Map<string, number>();
+  for (const w of wms) { base.set(`${w.r},${w.c},0`, w.dir); base.set(`${w.r},${w.c},1`, w.dir); }
+  // power-up hold refresh: reachable from a windmill (ignoring direction)
+  const fromWm = bfs([...base.keys()]);
+  for (const s of seats.values()) { s.srcConn = fromWm.has(`${s.r},${s.c},${s.lvl}`); if (s.power && s.srcConn) s.hold = POWER_HOLD;
+    if (s.power && s.hold > 0 && !s.srcConn) base.set(`${s.r},${s.c},${s.lvl}`, s.dir || ((s.r + s.c) % 2 ? -1 : 1)); }
+  // iterate side spin to a fixed point
+  let res = solve(base); postDir = new Map(); jamSides = new Set();
+  for (let it = 0; it < 4; it++) {
+    const demand = new Map<string, number[]>();
+    for (const s of seats.values()) { const sd = sideOf(s.r, s.c); if (!sd) continue; const k = `${s.r},${s.c},0`;
+      if (res.dir.has(k) && !res.jam.has(k)) (demand.get(sd) || demand.set(sd, []).get(sd)!).push(sideIdx(s.r, s.c) * 2 + (res.dir.get(k)! > 0 ? 1 : 0)); }
+    const pd = new Map<string, number>(), js = new Set<string>();
+    for (const [sd, list] of demand) {
+      const want = (i: number) => list.map(e => { const i0 = e >> 1, d0 = e & 1 ? 1 : -1; return d0 * ((i - i0) % 2 ? -1 : 1); });
+      if (new Set(want(0)).size > 1) { js.add(sd); continue; }
+      for (let i = 0; i < N; i++) pd.set(sideKey(sd, i), want(i)[0]);
+    }
+    const drv = new Map(base);
+    for (const [k, d] of pd) if (seats.has(k)) drv.set(k + ',0', d);
+    const next = solve(drv);
+    for (const sd of js) for (let i = 0; i < N; i++) { const k = sideKey(sd, i) + ',0'; if (seats.has(sideKey(sd, i)) && !next.jam.has(k)) { const st = [k]; next.jam.add(k); while (st.length) { const x = st.pop()!; for (const y of nbrs(x)) if (!next.jam.has(y)) { next.jam.add(y); st.push(y); } } } }
+    const same = pd.size === postDir.size && [...pd].every(([k, v]) => postDir.get(k) === v);
+    res = next; postDir = pd; jamSides = js;
+    if (same && it > 0) break;
+  }
+  jamLinks = res.conflicts;
   let n = 0, newly = 0;
-  for (const s of seats.values()) { const { r, c } = s;
-    s.on = live.has(`${r},${c},${s.lvl}`); if (s.on) { n++; if (!s.earned) { s.earned = true; newly++; } } }
-  // upper windmill hookup: a turning upper-level gear meshed directly to a windmill's upper gear
+  for (const s of seats.values()) { const k = `${s.r},${s.c},${s.lvl}`;
+    s.jam = res.jam.has(k); s.on = res.dir.has(k) && !s.jam; if (s.on) { s.dir = res.dir.get(k)!; n++; if (!s.earned) { s.earned = true; newly++; } } }
   const hooked: Mill[] = [];
   for (const w of wms) if (!w.upperDone && DIRS.some(([dr, dc]) => { const s = seatAt(w.r + dr, w.c + dc); return s && s.lvl === 1 && s.on; })) hooked.push(w);
-  const millOn = live.has(`${mill.r},${mill.c},0`) || live.has(`${mill.r},${mill.c},1`);
+  const mk = [`${mill.r},${mill.c},0`, `${mill.r},${mill.c},1`];
+  const millOn = mk.some(k => res.dir.has(k) && !res.jam.has(k));
   return { n, newly, hooked, millOn };
 }
 
 let paused = false, testQuiet = false;
 function step(dt: number) {
   if (paused) dt = 0;
-  wmAng += dt * 2; toastT = Math.max(0, toastT - dt);
+  wmAng += dt * 2; postAng += dt * 2;
+  for (const k of sparks) { k.t -= dt; k.x += k.vx * dt; k.y += k.vy * dt; k.vy += cs * 8 * dt; }
+  sparks = sparks.filter(k => k.t > 0);
+  if (dt > 0) {
+    for (const [u, v] of jamLinks) { const [r1, c1] = u.split(',').map(Number), [r2, c2] = v.split(',').map(Number); if (Math.random() < dt * 40) emit((ex(c1) + ex(c2)) / 2, (ey(r1) + ey(r2)) / 2, ri(2, 4)); }
+    for (const g of seats.values()) if (g.jam && Math.random() < dt * 6) { const a = rnd(0, 7); emit(ex(g.c) + Math.cos(a) * cs * 0.45, ey(g.r) + Math.sin(a) * cs * 0.45, ri(1, 3)); }
+  } toastT = Math.max(0, toastT - dt);
   if (!playing) return;
   if (over) { millAng += dt * millSpin; flash = Math.max(0, flash - dt); return; }
   time += dt;
@@ -155,7 +206,7 @@ function step(dt: number) {
     for (const [pr, pc] of freePinsNear(gr.x, gr.y)) {
       const px = ex(pc), py = ey(pr), d = Math.hypot(px - gr.x, py - gr.y);
       if (d < R + cs * 0.14 && K(pr, pc) !== gr.skip && Math.abs(angDiff(Math.atan2(py - gr.y, px - gr.x), gr.ang)) < SLOT_CATCH) {
-        seats.set(K(pr, pc), { r: pr, c: pc, age: 0, id: gr.id, power: gr.power, hold: 0, ang: gr.ang, on: false, srcConn: false, earned: gr.earned, lvl: inG(pr, pc) && raised(pr, pc) ? 1 : 0 });
+        seats.set(K(pr, pc), { r: pr, c: pc, age: 0, id: gr.id, power: gr.power, hold: 0, ang: gr.ang, on: false, srcConn: false, earned: gr.earned, dir: 0, jam: false, lvl: inG(pr, pc) && raised(pr, pc) ? 1 : 0 });
         gr.dead = true; caught = true; break;
       }
     }
@@ -190,10 +241,11 @@ function step(dt: number) {
   const pay = Math.min(bin, credit); if (pay > 0) { bin -= pay; credit -= pay; queue += pay; }
   for (const s of seats.values()) {
     s.age += dt;
-    if (s.on) s.ang += dt * 2 * ((s.r + s.c) % 2 ? -1 : 1);
-    else if (s.age > SETTLE_GRACE) { const d = angDiff(-Math.PI / 2, s.ang); s.ang += Math.sign(d) * Math.min(Math.abs(d), SETTLE_RATE * dt); } // heavy solid half sinks, slot swings up
+    if (s.on) s.ang += dt * 2 * s.dir;
+    else if (sideOf(s.r, s.c)) { /* locked on border post: holds still */ }
+    else if (!s.jam && s.age > SETTLE_GRACE) { const d = angDiff(-Math.PI / 2, s.ang); s.ang += Math.sign(d) * Math.min(Math.abs(d), SETTLE_RATE * dt); } // heavy solid half sinks, slot swings up
   }
-  for (const s of [...seats.values()]) if (Math.abs(angDiff(s.ang, -Math.PI / 2)) < SLOT_UP_TOL && !supported(s.r, s.c)) { releaseSeat(s.r, s.c); detached++; }
+  for (const s of [...seats.values()]) if (!sideOf(s.r, s.c) && Math.abs(angDiff(s.ang, -Math.PI / 2)) < SLOT_UP_TOL && !supported(s.r, s.c)) { releaseSeat(s.r, s.c); detached++; }
   if (p.millOn) finish(true);
   else if (!testQuiet && anteLeft + queue === 0 && gears.length === 0 && !(credit > 0 && bin > 0)) finish(false);
 }
@@ -214,7 +266,7 @@ function gearPath(x: number, y: number, R: number, teeth: number, ang: number) {
     ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); ctx.lineTo(x + Math.cos(a2) * rr, y + Math.sin(a2) * rr); }
   ctx.closePath();
 }
-function drawGear(x: number, y: number, ang: number, pw: boolean, on: boolean, hold = 0, upper = false, scale = 1) {
+function drawGear(x: number, y: number, ang: number, pw: boolean, on: boolean, hold = 0, upper = false, scale = 1, slot = true, jam = false) {
   const R = cs * 0.5 * scale;
   if (upper) { ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.beginPath(); ctx.arc(x + 3, y + 4, R, 0, 7); ctx.fill(); }
   if (pw) { ctx.shadowColor = '#5fe0ff'; ctx.shadowBlur = on ? 14 : 6; }
@@ -222,11 +274,14 @@ function drawGear(x: number, y: number, ang: number, pw: boolean, on: boolean, h
   gd.addColorStop(0, pw ? '#c8f6ff' : (upper ? '#fff6e0' : '#e8ecf0')); gd.addColorStop(1, pw ? '#1d8fb0' : (on ? (upper ? '#b07a20' : '#8a6a2a') : '#5b6370'));
   ctx.fillStyle = gd; gearPath(x, y, R, 10, ang); ctx.fill(); ctx.shadowBlur = 0;
   ctx.strokeStyle = upper ? '#f0b44c' : '#111'; ctx.lineWidth = upper ? 1.5 : 1; ctx.stroke();
-    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+  if (slot) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
   ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.beginPath(); ctx.arc(0, 0, R * 0.8, Math.PI / 2, Math.PI * 1.5); ctx.fill(); // solid (heavy) half shading
   ctx.fillStyle = '#0b0d10'; ctx.beginPath(); ctx.moveTo(R * 1.05, -R * 0.2); ctx.lineTo(R * 0.05, -R * 0.2); ctx.arc(R * 0.05, 0, R * 0.2, -Math.PI / 2, Math.PI / 2, true); ctx.lineTo(R * 1.05, R * 0.2); ctx.closePath(); ctx.fill();
   ctx.strokeStyle = '#f0b44c'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(R * 0.95, -R * 0.2); ctx.lineTo(R * 0.05, -R * 0.2); ctx.arc(R * 0.05, 0, R * 0.2, -Math.PI / 2, Math.PI / 2, true); ctx.lineTo(R * 0.95, R * 0.2); ctx.stroke();
   ctx.restore();
+  } else { ctx.fillStyle = '#20262e'; ctx.beginPath(); ctx.arc(x, y, R * 0.28, 0, 7); ctx.fill(); }
+  if (jam) { ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, R * 1.02, 0, 7); ctx.stroke(); }
   if (hold > 0) { ctx.strokeStyle = '#5fe0ff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, R * 1.05, -Math.PI / 2, -Math.PI / 2 + (hold / POWER_HOLD) * Math.PI * 2); ctx.stroke(); }
 }
 function draw() {
@@ -250,38 +305,47 @@ function draw() {
     else { ctx.fillStyle = '#101317'; ctx.fillRect(x + 3, y + 3, cs - 6, cs - 6); }
     ctx.fillStyle = pins[r][c] ? '#d8dde4' : '#2c323a'; ctx.beginPath(); ctx.arc(x + cs / 2, y + cs / 2, pins[r][c] ? cs * 0.1 : cs * 0.06, 0, 7); ctx.fill();
   }
-  for (const [er, ec] of edgeKeys()) { const on = edge.get(er + ',' + ec); ctx.fillStyle = on ? '#c9a24a' : '#2c323a'; ctx.beginPath(); ctx.arc(ex(ec), ey(er), on ? cs * 0.13 : cs * 0.08, 0, 7); ctx.fill(); }
+  for (const [er, ec] of edgeKeys()) { const on = edge.get(er + ',' + ec), pd = postDir.get(K(er, ec)), x = ex(ec), y = ey(er);
+    ctx.fillStyle = on ? '#c9a24a' : '#2c323a'; ctx.beginPath(); ctx.arc(x, y, on ? cs * 0.13 : cs * 0.08, 0, 7); ctx.fill();
+    if (pd) { ctx.save(); ctx.translate(x, y); ctx.rotate(postAng * pd); ctx.strokeStyle = '#3a2a08'; ctx.lineWidth = 2; for (let i = 0; i < 3; i++) { ctx.rotate(Math.PI / 3); ctx.beginPath(); ctx.moveTo(-cs * 0.13, 0); ctx.lineTo(cs * 0.13, 0); ctx.stroke(); } ctx.restore();
+      ctx.strokeStyle = 'rgba(255,214,110,.7)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, cs * 0.19, postAng * pd, postAng * pd + 4.5); ctx.stroke(); }
+    if (jamSides.has(sideOf(er, ec))) { ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, cs * 0.17, 0, 7); ctx.stroke(); } }
   ctx.fillStyle = '#1c2128'; ctx.fillRect(ox, oy + bw + cs * 0.85, bw, 22); ctx.fillStyle = '#7a8494'; ctx.font = '11px system-ui'; ctx.fillText(`▼ BIN ${bin} · binned total ${lost}`, ox + 8, oy + bw + cs * 0.85 + 15);
-  for (const s of seats.values()) { if (s) drawGear(ex(s.c), ey(s.r), s.ang, s.power, s.on, s.power && !s.srcConn ? s.hold : 0, s.lvl === 1); }
+  for (const s of seats.values()) drawGear(ex(s.c), ey(s.r), s.ang, s.power, s.on, s.power && !s.srcConn ? s.hold : 0, s.lvl === 1, 1, true, s.jam);
+  for (const [u, v] of jamLinks) { const [r1, c1] = u.split(',').map(Number), [r2, c2] = v.split(',').map(Number);
+    ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(ex(c1), ey(r1)); ctx.lineTo(ex(c2), ey(r2)); ctx.stroke();
+    ctx.fillStyle = '#ff3b3b'; ctx.font = `bold ${cs * 0.4}px system-ui`; ctx.fillText('✕', (ex(c1) + ex(c2)) / 2 - cs * 0.13, (ey(r1) + ey(r2)) / 2 + cs * 0.14); }
   for (const w of wms) {
     const x = cx(w.c), y = cy(w.r);
-    drawGear(x, y, wmAng, false, true);                       // floor gear
-    drawGear(x - 2, y - 3, -wmAng, false, true, 0, true, 0.72); // upper gear (stacked, counter-spin)
-    ctx.save(); ctx.translate(x - 2, y - 3); ctx.rotate(wmAng * 1.3); ctx.fillStyle = w.upperDone ? '#f0b44c' : '#e9e2cf';
+    drawGear(x, y, wmAng * w.dir, false, true, 0, false, 1, false);                       // floor gear
+    drawGear(x - 2, y - 3, wmAng * w.dir, false, true, 0, true, 0.72, false); // upper gear (stacked, counter-spin)
+    ctx.save(); ctx.translate(x - 2, y - 3); ctx.rotate(wmAng * 1.3 * w.dir); ctx.fillStyle = w.upperDone ? '#f0b44c' : '#e9e2cf';
     for (let i = 0; i < 4; i++) { ctx.rotate(Math.PI / 2); ctx.fillRect(-cs * 0.06, -cs * 0.85, cs * 0.12, cs * 0.55); ctx.strokeStyle = '#8a7a50'; ctx.strokeRect(-cs * 0.06, -cs * 0.85, cs * 0.12, cs * 0.55); }
     ctx.restore();
   }
   const mx = cx(mill.c), my = cy(mill.r);
-  drawGear(mx, my, millAng, false, won);
+  drawGear(mx, my, millAng, false, won, 0, false, 1, false);
   ctx.fillStyle = won ? '#f0b44c' : '#8b5a2b'; ctx.fillRect(mx - cs * 0.22, my - cs * 0.22, cs * 0.44, cs * 0.44);
   ctx.fillStyle = '#111'; ctx.font = `bold ${cs * 0.28}px system-ui`; ctx.fillText('M', mx - cs * 0.12, my + cs * 0.1);
   for (const g of gears) drawGear(g.x, g.y, g.ang, g.power, false);
+  for (const k of sparks) { ctx.strokeStyle = k.col; ctx.lineWidth = 3; ctx.shadowColor = "#ffb000"; ctx.shadowBlur = 6; ctx.beginPath(); ctx.moveTo(k.x, k.y); ctx.lineTo(k.x - k.vx * 0.05, k.y - k.vy * 0.05); ctx.stroke(); } ctx.shadowBlur = 0;
   if (toastT > 0) { ctx.globalAlpha = Math.min(1, toastT); ctx.fillStyle = '#1b2a1e'; ctx.fillRect(10, oy + bw / 2 - 18, W - 20, 30); ctx.fillStyle = '#7dff9a'; ctx.font = 'bold 14px system-ui'; ctx.fillText(toast, 20, oy + bw / 2 + 2); ctx.globalAlpha = 1; }
   if (flash > 0) { ctx.fillStyle = `rgba(255,220,120,${flash * 0.35})`; ctx.fillRect(0, 0, W, H); }
 }
 let last = performance.now();
 function loop(t: number) { const dt = Math.min(0.05, (t - last) / 1000); last = t; step(dt); draw(); requestAnimationFrame(loop); }
 reset(); requestAnimationFrame(loop);
-document.getElementById('go')!.onclick = () => { document.getElementById('help')!.classList.add('h'); reset(); playing = true; };
+const startGame = () => { document.getElementById('help')!.classList.add('h'); reset(); playing = true; };
+document.getElementById('go')!.onclick = startGame; document.getElementById('go2')!.onclick = startGame;
 document.getElementById('again')!.onclick = () => { document.getElementById('over')!.classList.add('h'); reset(); playing = true; };
 if (import.meta.env.DEV) {
   (window as any).__gm = {
     tap, raised, pinUp,
-    seat(r: number, c: number, pw = false, ang = Math.PI / 2) { if (inG(r, c)) pins[r][c] = true; else edge.set(K(r, c), true); seats.set(K(r, c), { r, c, age: 0, ang, id: nextId++, power: pw, hold: 0, on: false, srcConn: false, earned: false, lvl: inG(r, c) && raised(r, c) ? 1 : 0 }); },
+    seat(r: number, c: number, pw = false, ang = Math.PI / 2) { if (inG(r, c)) pins[r][c] = true; else edge.set(K(r, c), true); seats.set(K(r, c), { r, c, age: 0, ang, id: nextId++, power: pw, hold: 0, on: false, srcConn: false, earned: false, dir: 0, jam: false, lvl: inG(r, c) && raised(r, c) ? 1 : 0 }); },
     drop(x: number, y: number, ang: number, vx = 0, vy = 0) { gears.push({ id: nextId++, x, y, vx, vy, ang, va: 0, power: false, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: false }); },
     pause(v: boolean) { paused = v; }, quiet(v: boolean) { testQuiet = v; }, ex, ey, supported,
     setPin(r: number, c: number, v: boolean) { if (inG(r, c)) pins[r][c] = v; else edge.set(r + ',' + c, v); },
-    addBin(n: number) { bin += n; },
-    get state() { return { score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang })) }; },
+    addBin(n: number) { bin += n; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
+    get state() { return { score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, postDir: Object.fromEntries(postDir), jamSides: [...jamSides], jamLinks, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang, dir: s.dir, jam: s.jam })) }; },
   };
 }
