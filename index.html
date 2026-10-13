@@ -6,12 +6,15 @@ button{background:#f0b44c;color:#111;border:0;border-radius:8px;padding:10px 18p
 <body><canvas id="c"></canvas>
 <div id="help" class="ov"><div class="card"><h2>⚙ GEAR MILL</h2>
 <p>Link the <b>windmill</b> drive gear to the <b>mill</b> with a gear train.</p>
-<ul style="padding-left:18px;margin:6px 0"><li>Tap a <b>square</b> to raise/retract it (its pin goes with it). A square only rises if its 4 corner <b>posts</b> are up.</li>
-<li>Tap near a <b>corner</b> to toggle a post. Dropping a post drops the squares touching it.</li>
-<li>Gears roll along the top rack and tumble down the slope. They seat on raised pins they pass.</li>
-<li>Seated gears touching side-by-side mesh. Connected to the windmill = turning = <b>+1 pt/sec each</b>.</li>
-<li><b style="color:#5fe0ff">Glowing</b> power gears keep spinning (and powering neighbours) 15 s after disconnect.</li>
-<li>More pins up = gears roll in faster. 50 gears per game. Hook up the mill for a bonus!</li></ul>
+<ul style="padding-left:18px;margin:6px 0">
+<li>Tap a <b>square</b> to raise/lower its center <b>pin</b>. Tap a <b>border post</b> (outside ring) to toggle it.</li>
+<li>A square <b>lifts</b> by itself when the 4 pins/posts beside it (left, right, up, down) are all up. It drops if any of them drops.</li>
+<li>Gears roll along the top rack, tumble down the slope and seat on pins that are up. Gears only mesh side-by-side on the <b>same level</b> (floor or lifted).</li>
+<li>The <b>windmill</b> has a floor gear and an upper gear. Turning gears score <b>+1 pt/sec each</b>.</li>
+<li>Every gear you newly connect earns <b>10 gears back</b> from the bin (credit pays out as gears hit the bin).</li>
+<li>Link a lifted gear to a windmill's <b>upper gear</b>: the whole bin returns to the queue and a <b>new windmill</b> appears.</li>
+<li><b style="color:#5fe0ff">Glowing</b> power gears keep spinning their neighbours 15 s after disconnect.</li>
+<li>Connect the <b>mill</b> for +100. Out of gears = game over.</li></ul>
 <button id="go">PLAY</button></div></div>
 <div id="over" class="ov h"><div class="card" style="text-align:center"><h2 id="ot"></h2><div id="os"></div><button id="again">RESTART</button></div></div>
 <script type="module" src="/src/main.ts"></script></body></html>
