@@ -204,23 +204,46 @@ function step(dt: number) {
       if ((gr.dir > 0 && gr.x >= gr.dropX) || (gr.dir < 0 && gr.x <= gr.dropX)) { gr.phase = 'fall'; gr.vx = gr.dir * rollV * 0.3; gr.vy = 0; gr.va = gr.dir * 4; }
       continue;
     }
-    gr.vy += g * dt; gr.vx += rnd(-1, 1) * cs * 2 * dt; gr.vx *= 0.995;
-    gr.x += gr.vx * dt; gr.y += gr.vy * dt; gr.ang += gr.va * dt;
+    // substepped motion so fast gears can't tunnel through blocks
+    const nSub = Math.min(8, Math.max(1, Math.ceil(Math.hypot(gr.vx, gr.vy) * dt / (cs * 0.15)))), sdt = dt / nSub;
+    let caught = false, onBlock = false;
+    if (gr.skipT) { gr.skipT -= dt; if (gr.skipT <= 0) gr.skip = undefined; }
+    for (let sub = 0; sub < nSub && !caught; sub++) {
+    gr.vy += g * sdt; gr.vx += rnd(-1, 1) * cs * 2 * sdt; gr.vx *= Math.pow(0.995, 1 / nSub);
+    gr.x += gr.vx * sdt; gr.y += gr.vy * sdt; gr.ang += gr.va * sdt;
     const wl = ox - cs * 0.75 + R, wr = ox + N * cs + cs * 0.75 - R;
     if (gr.x < wl) { gr.x = wl; gr.vx = Math.abs(gr.vx) * 0.5; gr.va = rnd(-6, 6); }
     if (gr.x > wr) { gr.x = wr; gr.vx = -Math.abs(gr.vx) * 0.5; gr.va = rnd(-6, 6); }
-    if (gr.skipT) { gr.skipT -= dt; if (gr.skipT <= 0) gr.skip = undefined; }
     const c = Math.floor((gr.x - ox) / cs), r = Math.floor((gr.y - oy) / cs);
-    // slot catch: any free raised pin/post touching the gear where the open slot faces it
-    let caught = false;
+    // slot catch. Pins on raised blocks stick up out of the block, so their catch reach extends to the block edge.
     for (const [pr, pc] of freePinsNear(gr.x, gr.y)) {
       const px = ex(pc), py = ey(pr), d = Math.hypot(px - gr.x, py - gr.y);
-      if (d < R + cs * 0.14 && K(pr, pc) !== gr.skip && Math.abs(angDiff(Math.atan2(py - gr.y, px - gr.x), gr.ang)) < SLOT_CATCH) {
+      const reach = inG(pr, pc) && raised(pr, pc) ? R + cs * 0.56 : R + cs * 0.14;
+      if (d < reach && K(pr, pc) !== gr.skip && Math.abs(angDiff(Math.atan2(py - gr.y, px - gr.x), gr.ang)) < SLOT_CATCH) {
         seats.set(K(pr, pc), { r: pr, c: pc, age: 0, id: gr.id, power: gr.power, hold: 0, ang: gr.ang, on: false, srcConn: false, earned: gr.earned, dir: 0, jam: false, lvl: inG(pr, pc) && raised(pr, pc) ? 1 : 0 });
         gr.dead = true; caught = true; break;
       }
     }
-    if (caught) continue;
+    if (caught) break;
+    // raised squares are solid rounded blocks
+    for (let rr = Math.max(0, r - 1); rr <= Math.min(N - 1, r + 1); rr++) for (let cc = Math.max(0, c - 1); cc <= Math.min(N - 1, c + 1); cc++) {
+      if (!raised(rr, cc)) continue;
+      const rad = cs * 0.1, x0 = ox + cc * cs + 2 + rad, x1 = ox + (cc + 1) * cs - 2 - rad, y0 = oy + rr * cs + 2 + rad, y1 = oy + (rr + 1) * cs - 2 - rad;
+      const qx = Math.max(x0, Math.min(x1, gr.x)), qy = Math.max(y0, Math.min(y1, gr.y));
+      let dx = gr.x - qx, dy = gr.y - qy, d = Math.hypot(dx, dy), nx = 0, ny = 0;
+      if (d > 1e-6) { if (d >= R + rad) continue; nx = dx / d; ny = dy / d; gr.x = qx + nx * (R + rad); gr.y = qy + ny * (R + rad); }
+      else { // centre inside the block (square rose under it): eject through the nearest side that isn't another raised block
+        const sides: [number, number, number, number, number][] = [[gr.x - x0, -1, 0, 0, -1], [x1 - gr.x, 1, 0, 0, 1], [gr.y - y0, 0, -1, -1, 0], [y1 - gr.y, 0, 1, 1, 0]];
+        sides.sort((a, b) => a[0] - b[0]);
+        const pick = sides.find(([, , , dr, dc]) => !(inG(rr + dr, cc + dc) && raised(rr + dr, cc + dc))) || sides[0];
+        nx = pick[1]; ny = pick[2];
+        if (nx) gr.x = (nx < 0 ? x0 : x1) + nx * (R + rad); else gr.y = (ny < 0 ? y0 : y1) + ny * (R + rad);
+      }
+      const vn = gr.vx * nx + gr.vy * ny;
+      if (vn < 0) { const tx = -ny, ty = nx; let vt = gr.vx * tx + gr.vy * ty; const vnn = -vn * (Math.abs(vn) > cs * 1.5 ? 0.45 : 0); vt *= 0.985;
+        gr.vx = nx * vnn + tx * vt; gr.vy = ny * vnn + ty * vt; gr.va = vt / R; }
+      if (ny < -0.5) onBlock = true;
+    }
     const col: [number, number, number][] = [];
     for (let rr = Math.max(0, r - 1); rr <= Math.min(N - 1, r + 1); rr++) for (let cc = Math.max(0, c - 1); cc <= Math.min(N - 1, c + 1); cc++) {
       if (locked(rr, cc)) col.push([cx(cc), cy(rr), cs * 0.45]);
@@ -232,7 +255,9 @@ function step(dt: number) {
       if (d < m && d > 0.01) { const nx = dx / d, ny = dy / d; gr.x = px + nx * m; gr.y = py + ny * m;
         const vn = gr.vx * nx + gr.vy * ny; if (vn < 0) { gr.vx -= 1.5 * vn * nx; gr.vy -= 1.5 * vn * ny; gr.vx += rnd(-0.3, 0.3) * cs; gr.va = rnd(-6, 6); } }
     }
-    if (Math.hypot(gr.vx, gr.vy) < cs * 0.8) { gr.stuck += dt; if (gr.stuck > 0.6) gr.vx += (Math.random() < 0.5 ? -1 : 1) * cs * 3; if (gr.stuck > 3) { gr.dead = true; lost++; bin++; continue; } }
+    }
+    if (caught) continue;
+    if (Math.hypot(gr.vx, gr.vy) < cs * 0.8) { gr.stuck += dt; if (gr.stuck > 0.6) { gr.vx += (Math.sign(gr.vx) || (Math.random() < 0.5 ? -1 : 1)) * cs * 3; gr.stuck = 0.3; } if (gr.stuck > (onBlock ? 6 : 3)) { gr.dead = true; lost++; bin++; continue; } }
     else gr.stuck = Math.max(0, gr.stuck - dt);
     if (gr.y > oy + N * cs + cs * 1.1) { gr.dead = true; lost++; bin++; }
   }
@@ -365,7 +390,7 @@ if (import.meta.env.DEV) {
     drop(x: number, y: number, ang: number, vx = 0, vy = 0) { gears.push({ id: nextId++, x, y, vx, vy, ang, va: 0, power: false, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: false }); },
     pause(v: boolean) { paused = v; }, quiet(v: boolean) { testQuiet = v; }, ex, ey, supported,
     setPin(r: number, c: number, v: boolean) { if (inG(r, c)) pins[r][c] = v; else setEdge(r, c, v); },
-    addBin(n: number) { bin += n; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
+    addBin(n: number) { bin += n; }, gearsInfo() { return gears.map(g => ({ x: g.x, y: g.y, vx: g.vx, vy: g.vy, phase: g.phase })); }, flipRow(r: number) { for (let c = 0; c < N; c++) flip[r][c] = !flip[r][c]; }, flipCell(r: number, c: number) { flip[r][c] = !flip[r][c]; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
     get state() { return { score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, postDir: Object.fromEntries(postDir), jamSides: [...jamSides], jamLinks, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang, dir: s.dir, jam: s.jam })) }; },
   };
 }
