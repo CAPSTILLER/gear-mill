@@ -1,6 +1,17 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Gear Mill — beta</title>
-<style>html,body{margin:0;background:#0b0d10;color:#ddd;font-family:system-ui,sans-serif;overflow:hidden;touch-action:none}canvas{display:block;margin:0 auto}
-#ov{position:fixed;inset:0;background:rgba(5,6,8,.88);display:flex;align-items:center;justify-content:center;z-index:2}#ov .c{max-width:360px;margin:16px;padding:18px;border:1px solid #c8902a;border-radius:12px;background:#15181d;font-size:14px;line-height:1.45}
-h2{margin:0 0 8px;color:#e8b04a;letter-spacing:2px}button{background:#c8902a;color:#111;border:0;border-radius:8px;padding:10px 18px;font-weight:700;font-size:15px;margin-top:10px}
-#help{position:fixed;top:8px;right:8px;z-index:1;padding:4px 10px;margin:0;font-size:13px}</style></head>
-<body><canvas id="cv"></canvas><button id="help">?</button><div id="ov"><div class="c" id="ovc"></div></div><script type="module" src="/src/main.ts"></script></body></html>
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Gear Mill</title>
+<style>html,body{margin:0;background:#0b0d10;color:#dfe6ee;font-family:system-ui,sans-serif;overflow:hidden;touch-action:none}canvas{display:block;margin:0 auto}
+.ov{position:fixed;inset:0;background:rgba(5,7,10,.88);display:flex;align-items:center;justify-content:center;padding:18px;z-index:5}.ov.h{display:none}
+.card{max-width:380px;background:#161b22;border:1px solid #3a4250;border-radius:12px;padding:18px;line-height:1.4;font-size:14px}.card h2{margin:0 0 8px;color:#f0b44c}
+button{background:#f0b44c;color:#111;border:0;border-radius:8px;padding:10px 18px;font-weight:700;font-size:15px;margin-top:10px}</style></head>
+<body><canvas id="c"></canvas>
+<div id="help" class="ov"><div class="card"><h2>⚙ GEAR MILL</h2>
+<p>Link the <b>windmill</b> drive gear to the <b>mill</b> with a gear train.</p>
+<ul style="padding-left:18px;margin:6px 0"><li>Tap a <b>square</b> to raise/retract it (its pin goes with it). A square only rises if its 4 corner <b>posts</b> are up.</li>
+<li>Tap near a <b>corner</b> to toggle a post. Dropping a post drops the squares touching it.</li>
+<li>Gears roll along the top rack and tumble down the slope. They seat on raised pins they pass.</li>
+<li>Seated gears touching side-by-side mesh. Connected to the windmill = turning = <b>+1 pt/sec each</b>.</li>
+<li><b style="color:#5fe0ff">Glowing</b> power gears keep spinning (and powering neighbours) 15 s after disconnect.</li>
+<li>More pins up = gears roll in faster. 50 gears per game. Hook up the mill for a bonus!</li></ul>
+<button id="go">PLAY</button></div></div>
+<div id="over" class="ov h"><div class="card" style="text-align:center"><h2 id="ot"></h2><div id="os"></div><button id="again">RESTART</button></div></div>
+<script type="module" src="/src/main.ts"></script></body></html>
