@@ -13,6 +13,17 @@ type Spark = { x: number; y: number; vx: number; vy: number; t: number; col: str
 let sparks: Spark[] = [];
 const SPARK_COLS = ['#ffffff', '#fff27a', '#ffd23a', '#ff9a1f'];
 function emit(x: number, y: number, n: number) { for (let i = 0; i < n; i++) { const a = rnd(0, Math.PI * 2), v = rnd(0.8, 3.5) * cs; sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - cs, t: rnd(0.15, 0.45), col: SPARK_COLS[ri(0, 3)] }); } }
+const HOLE_COST = 100, HOLE_TIME = 100, SWEEP_EVERY = 120, SWEEP_STEPS = 80;
+let holeT = 0, sweepNext = SWEEP_EVERY, sweep: { k: number; t: number } | null = null, sweepPost = '';
+const sweepOrder: [number, number][] = [];
+for (let c = 0; c < 10; c++) sweepOrder.push([-1, c]); for (let r = 0; r < 10; r++) sweepOrder.push([r, 10]);
+for (let c = 9; c >= 0; c--) sweepOrder.push([10, c]); for (let r = 9; r >= 0; r--) sweepOrder.push([r, -1]);
+function buyHole() {
+  if (!playing || over || holeT > 0 || queue + credit + anteLeft < HOLE_COST) return false;
+  let need = HOLE_COST; const q = Math.min(queue, need); queue -= q; need -= q;
+  const cr = Math.min(credit, need); credit -= cr; need -= cr; anteLeft -= need;
+  holeT = HOLE_TIME; say('HOLE GEARS · 100 s'); return true;
+}
 let detached = 0, anteLeft = 0, queue = 0, bin = 0, credit = 0, spawned = 0, lost = 0, reclaims = 0, nextId = 1;
 let spawnT = 0, score = 0, time = 0, over = false, won = false, playing = false, flash = 0, wmAng = 0, millAng = 0, millSpin = 0, toast = '', toastT = 0;
 let best = +(localStorage.getItem('gearmill.best') || 0);
@@ -41,13 +52,14 @@ const pinUp = (r: number, c: number) => inG(r, c) ? pins[r][c] : !!edge.get(r + 
 const pinRaised = (r: number, c: number) => DIRS.every(([dr, dc]) => pinUp(r + dr, c + dc));
 const postDown = (r: number, c: number) => edge.get(K(r, c)) === false;
 // ROW/COLUMN FLIP: opposite border posts pair up (left r <-> right r, top c <-> bottom c).
-// Lowering the second post of a pair inverts every square in that line (XOR with the pin rule).
+// When a pair becomes MATCHING (both up or both down) it inverts every square in that line (XOR with the pin rule).
 let flip: boolean[][] = [], sweeps: { row: boolean; i: number; t: number }[] = [];
 const partner = (r: number, c: number): [number, number] => c < 0 ? [r, N] : c >= N ? [r, -1] : r < 0 ? [N, c] : [-1, c];
 function setEdge(r: number, c: number, v: boolean) {
   const k = K(r, c); if (!edge.has(k) || edge.get(k) === v) return;
   edge.set(k, v);
-  if (!v) { releaseSeat(r, c); const [pr, pc] = partner(r, c); if (postDown(pr, pc)) {
+  if (!v) releaseSeat(r, c);
+  { const [pr, pc] = partner(r, c); if (edge.get(K(pr, pc)) === v) {
     const row = c < 0 || c >= N, i = row ? r : c;
     for (let j = 0; j < N; j++) { const rr = row ? i : j, cc = row ? j : i; flip[rr][cc] = !flip[rr][cc]; }
     sweeps.push({ row, i, t: 0 }); say(`${row ? 'ROW' : 'COLUMN'} ${i + 1} FLIPPED`);
@@ -73,6 +85,7 @@ function reset() {
   seats = new Map();
   gears = []; wms = [];
   anteLeft = ANTE; queue = 0; bin = 0; credit = 0; spawned = lost = reclaims = 0;
+  holeT = 0; sweepNext = SWEEP_EVERY; sweep = null; sweepPost = '';
   spawnT = 0; score = 0; time = 0; over = won = false; flash = 0; millSpin = 0; toast = ''; toastT = 0;
   const d = { r: ri(0, 1), c: ri(0, N - 1) };
   addWindmill(d.r, d.c);
@@ -192,7 +205,14 @@ function step(dt: number) {
   } toastT = Math.max(0, toastT - dt);
   if (!playing) return;
   if (over) { millAng += dt * millSpin; flash = Math.max(0, flash - dt); return; }
-  time += dt;
+  time += dt; flash = Math.max(0, flash - dt);
+  if (holeT > 0) { holeT = Math.max(0, holeT - dt); if (holeT === 0) say('HOLE GEARS ENDED'); }
+  if (!sweep && time >= sweepNext) { sweep = { k: 0, t: 0 }; say('BORDER SWEEP'); }
+  if (sweep) {
+    while (sweep && sweep.t <= 0) { const [r, c] = sweepOrder[sweep.k % 40]; sweepPost = K(r, c); setEdge(r, c, !edge.get(K(r, c))); sweep.k++; sweep.t += 1;
+      if (sweep.k >= SWEEP_STEPS) { sweep = null; sweepPost = ''; sweepNext += SWEEP_EVERY; if (sweepNext < time) sweepNext = time; } }
+    if (sweep) sweep.t -= dt;
+  }
   // levels follow the raise rule; seated gears ride with their square
   for (const s of seats.values()) s.lvl = inG(s.r, s.c) && raised(s.r, s.c) ? 1 : 0;
   spawnT -= dt;
@@ -219,7 +239,7 @@ function step(dt: number) {
     for (const [pr, pc] of freePinsNear(gr.x, gr.y)) {
       const px = ex(pc), py = ey(pr), d = Math.hypot(px - gr.x, py - gr.y);
       const reach = inG(pr, pc) && raised(pr, pc) ? R + cs * 0.56 : R + cs * 0.14;
-      if (d < reach && K(pr, pc) !== gr.skip && Math.abs(angDiff(Math.atan2(py - gr.y, px - gr.x), gr.ang)) < SLOT_CATCH) {
+      if (d < reach && K(pr, pc) !== gr.skip && (holeT > 0 || Math.abs(angDiff(Math.atan2(py - gr.y, px - gr.x), gr.ang)) < SLOT_CATCH)) {
         seats.set(K(pr, pc), { r: pr, c: pc, age: 0, id: gr.id, power: gr.power, hold: 0, ang: gr.ang, on: false, srcConn: false, earned: gr.earned, dir: 0, jam: false, lvl: inG(pr, pc) && raised(pr, pc) ? 1 : 0 });
         gr.dead = true; caught = true; break;
       }
@@ -271,16 +291,16 @@ function step(dt: number) {
     const back = bin; queue += bin; bin = 0;
     const spot = freeSquare((r, c) => Math.abs(r - mill.r) + Math.abs(c - mill.c) < 2);
     if (spot) addWindmill(spot.r, spot.c);
-    flash = 0.6; say(`UPPER LINK! +${back} gears reclaimed${spot ? ' · new windmill' : ''}`);
+    flash = 0.9; say(`UPPER LINK! +${back} gears reclaimed${spot ? ' · new windmill' : ''}`);
   }
   const pay = Math.min(bin, credit); if (pay > 0) { bin -= pay; credit -= pay; queue += pay; }
   for (const s of seats.values()) {
     s.age += dt;
     if (s.on) s.ang += dt * 2 * s.dir;
     else if (sideOf(s.r, s.c)) { /* locked on border post: holds still */ }
-    else if (!s.jam && s.age > SETTLE_GRACE) { const d = angDiff(-Math.PI / 2, s.ang); s.ang += Math.sign(d) * Math.min(Math.abs(d), SETTLE_RATE * dt); } // heavy solid half sinks, slot swings up
+    else if (holeT === 0 && !s.jam && s.age > SETTLE_GRACE) { const d = angDiff(-Math.PI / 2, s.ang); s.ang += Math.sign(d) * Math.min(Math.abs(d), SETTLE_RATE * dt); } // heavy solid half sinks, slot swings up
   }
-  for (const s of [...seats.values()]) if (!sideOf(s.r, s.c) && Math.abs(angDiff(s.ang, -Math.PI / 2)) < SLOT_UP_TOL && !supported(s.r, s.c)) { releaseSeat(s.r, s.c); detached++; }
+  for (const s of [...seats.values()]) if (holeT === 0 && !sideOf(s.r, s.c) && Math.abs(angDiff(s.ang, -Math.PI / 2)) < SLOT_UP_TOL && !supported(s.r, s.c)) { releaseSeat(s.r, s.c); detached++; }
   if (p.millOn) finish(true);
   else if (!testQuiet && anteLeft + queue === 0 && gears.length === 0 && !(credit > 0 && bin > 0)) finish(false);
 }
@@ -327,6 +347,11 @@ function draw() {
   ctx.fillText(`Score ${Math.floor(score)}`, 10, 42); ctx.fillText(`Best ${best}`, 110, 42); ctx.fillText(`Pins ${pinsUpCount()}`, 200, 42); ctx.fillText(`${time.toFixed(0)}s`, W - 40, 22);
   ctx.fillText(`Ante ${anteLeft}`, 10, 60); ctx.fillText(`Queue ${queue}`, 90, 60); ctx.fillText(`Bin ${bin}`, 180, 60);
   ctx.fillStyle = credit > 0 ? '#7dff9a' : '#dfe6ee'; ctx.fillText(`Credit ${credit}`, 250, 60);
+  if (sweep) { ctx.fillStyle = '#50dcff'; ctx.font = 'bold 12px system-ui'; ctx.fillText(`SWEEP ${sweep.k}/${SWEEP_STEPS}`, 10, 80); }
+  else { ctx.fillStyle = '#6b7585'; ctx.font = '11px system-ui'; ctx.fillText(`sweep in ${Math.ceil(sweepNext - time)}s`, 10, 80); }
+  const hb = document.getElementById('hole') as HTMLButtonElement | null;
+  if (hb) { const can = playing && !over && holeT === 0 && queue + credit + anteLeft >= HOLE_COST; hb.disabled = !can;
+    hb.textContent = holeT > 0 ? `◎ HOLE ${Math.ceil(holeT)}s` : `◎ HOLE GEARS · ${HOLE_COST}`; hb.classList.toggle('on', holeT > 0); }
   ctx.fillStyle = '#9aa4b2'; ctx.fillText(`Windmills ${wms.length}`, W - 100, 42);
   ctx.fillStyle = '#3a4250'; ctx.fillRect(0, rackY + cs * 0.42, W, 6);
   ctx.fillStyle = '#6b7585'; for (let x = 0; x < W; x += 8) ctx.fillRect(x, rackY + cs * 0.42 - 3, 4, 3);
@@ -346,7 +371,7 @@ function draw() {
       ctx.strokeStyle = 'rgba(255,214,110,.7)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, cs * 0.19, postAng * pd, postAng * pd + 4.5); ctx.stroke(); }
     if (jamSides.has(sideOf(er, ec))) { ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, cs * 0.17, 0, 7); ctx.stroke(); } }
   ctx.fillStyle = '#1c2128'; ctx.fillRect(ox, oy + bw + cs * 0.85, bw, 22); ctx.fillStyle = '#7a8494'; ctx.font = '11px system-ui'; ctx.fillText(`▼ BIN ${bin} · binned total ${lost}`, ox + 8, oy + bw + cs * 0.85 + 15);
-  for (const s of seats.values()) drawGear(ex(s.c), ey(s.r), s.ang, s.power, s.on, s.power && !s.srcConn ? s.hold : 0, s.lvl === 1, 1, true, s.jam);
+  for (const s of seats.values()) drawGear(ex(s.c), ey(s.r), s.ang, s.power, s.on, s.power && !s.srcConn ? s.hold : 0, s.lvl === 1, 1, holeT === 0, s.jam);
   for (const [u, v] of jamLinks) { const [r1, c1] = u.split(',').map(Number), [r2, c2] = v.split(',').map(Number);
     ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(ex(c1), ey(r1)); ctx.lineTo(ex(c2), ey(r2)); ctx.stroke();
     ctx.fillStyle = '#ff3b3b'; ctx.font = `bold ${cs * 0.4}px system-ui`; ctx.fillText('✕', (ex(c1) + ex(c2)) / 2 - cs * 0.13, (ey(r1) + ey(r2)) / 2 + cs * 0.14); }
@@ -362,8 +387,10 @@ function draw() {
   drawGear(mx, my, millAng, false, won, 0, false, 1, false);
   ctx.fillStyle = won ? '#f0b44c' : '#8b5a2b'; ctx.fillRect(mx - cs * 0.22, my - cs * 0.22, cs * 0.44, cs * 0.44);
   ctx.fillStyle = '#111'; ctx.font = `bold ${cs * 0.28}px system-ui`; ctx.fillText('M', mx - cs * 0.12, my + cs * 0.1);
-  for (const g of gears) drawGear(g.x, g.y, g.ang, g.power, false);
+  for (const g of gears) drawGear(g.x, g.y, g.ang, g.power, false, 0, false, 1, holeT === 0);
   for (const k of sparks) { ctx.strokeStyle = k.col; ctx.lineWidth = 3; ctx.shadowColor = "#ffb000"; ctx.shadowBlur = 6; ctx.beginPath(); ctx.moveTo(k.x, k.y); ctx.lineTo(k.x - k.vx * 0.05, k.y - k.vy * 0.05); ctx.stroke(); } ctx.shadowBlur = 0;
+  if (sweepPost) { const [r, c] = sweepPost.split(',').map(Number); const a = 0.5 + 0.5 * Math.sin(performance.now() / 90);
+    ctx.fillStyle = `rgba(80,220,255,${0.35 + 0.4 * a})`; ctx.beginPath(); ctx.arc(ex(c), ey(r), cs * 0.32, 0, 7); ctx.fill(); }
   // pair cue: one post of a pair down -> pulse its partner as the target
   for (const [er, ec] of edgeKeys()) if (postDown(er, ec)) { const [pr, pc] = partner(er, ec); if (!postDown(pr, pc)) {
     const a = 0.5 + 0.5 * Math.sin(performance.now() / 150);
@@ -375,13 +402,13 @@ function draw() {
     if (w.row) { const x = ox + f * N * cs; ctx.fillRect(ox, oy + w.i * cs, x - ox, cs); ctx.fillStyle = `rgba(255,255,255,${1 - f})`; ctx.fillRect(x - 4, oy + w.i * cs, 8, cs); }
     else { const y = oy + f * N * cs; ctx.fillRect(ox + w.i * cs, oy, cs, y - oy); ctx.fillStyle = `rgba(255,255,255,${1 - f})`; ctx.fillRect(ox + w.i * cs, y - 4, cs, 8); } }
   if (toastT > 0) { ctx.globalAlpha = Math.min(1, toastT); ctx.fillStyle = '#1b2a1e'; ctx.fillRect(10, oy + bw + cs * 0.85 + 28, W - 20, 30); ctx.fillStyle = '#7dff9a'; ctx.font = 'bold 14px system-ui'; ctx.fillText(toast, 20, oy + bw + cs * 0.85 + 48); ctx.globalAlpha = 1; }
-  if (flash > 0) { ctx.fillStyle = `rgba(255,220,120,${flash * 0.35})`; ctx.fillRect(0, 0, W, H); }
+  if (flash > 0) { ctx.fillStyle = `rgba(255,220,120,${Math.min(1, flash) * 0.35})`; ctx.fillRect(0, 0, W, H); }
 }
 let last = performance.now();
 function loop(t: number) { const dt = Math.min(0.05, (t - last) / 1000); last = t; step(dt); draw(); requestAnimationFrame(loop); }
 reset(); requestAnimationFrame(loop);
 const startGame = () => { document.getElementById('help')!.classList.add('h'); reset(); playing = true; };
-document.getElementById('go')!.onclick = startGame; document.getElementById('go2')!.onclick = startGame;
+document.getElementById('go')!.onclick = startGame; document.getElementById('hole')!.onclick = () => { buyHole(); }; document.getElementById('go2')!.onclick = startGame;
 document.getElementById('again')!.onclick = () => { document.getElementById('over')!.classList.add('h'); reset(); playing = true; };
 if (import.meta.env.DEV) {
   (window as any).__gm = {
@@ -390,7 +417,7 @@ if (import.meta.env.DEV) {
     drop(x: number, y: number, ang: number, vx = 0, vy = 0) { gears.push({ id: nextId++, x, y, vx, vy, ang, va: 0, power: false, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: false }); },
     pause(v: boolean) { paused = v; }, quiet(v: boolean) { testQuiet = v; }, ex, ey, supported,
     setPin(r: number, c: number, v: boolean) { if (inG(r, c)) pins[r][c] = v; else setEdge(r, c, v); },
-    addBin(n: number) { bin += n; }, gearsInfo() { return gears.map(g => ({ x: g.x, y: g.y, vx: g.vx, vy: g.vy, phase: g.phase })); }, flipRow(r: number) { for (let c = 0; c < N; c++) flip[r][c] = !flip[r][c]; }, flipCell(r: number, c: number) { flip[r][c] = !flip[r][c]; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
-    get state() { return { score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, postDir: Object.fromEntries(postDir), jamSides: [...jamSides], jamLinks, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang, dir: s.dir, jam: s.jam })) }; },
+    addBin(n: number) { bin += n; }, buyHole, setTime(t: number) { time = t; }, setHole(t: number) { holeT = t; }, setQueue(n: number) { queue = n; }, setCredit(n: number) { credit = n; }, order: sweepOrder, edgeUp(r: number, c: number) { return edge.get(K(r, c)); }, flipAt(r: number, c: number) { return flip[r][c]; }, gearsInfo() { return gears.map(g => ({ x: g.x, y: g.y, vx: g.vx, vy: g.vy, phase: g.phase })); }, flipRow(r: number) { for (let c = 0; c < N; c++) flip[r][c] = !flip[r][c]; }, flipCell(r: number, c: number) { flip[r][c] = !flip[r][c]; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
+    get state() { return { flash, holeT, sweep: sweep && { ...sweep }, sweepPost, sweepNext, time, score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, postDir: Object.fromEntries(postDir), jamSides: [...jamSides], jamLinks, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang, dir: s.dir, jam: s.jam })) }; },
   };
 }
