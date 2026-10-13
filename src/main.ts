@@ -3,18 +3,22 @@ const cv = document.getElementById('c') as HTMLCanvasElement;
 const ctx = cv.getContext('2d')!;
 const N = 10, ANTE = 50, SPAWN = 0.5, POWER_HOLD = 15, REWARD = 10, WIN_BONUS = 100;
 let W = 0, H = 0, cs = 0, ox = 0, oy = 0, rackY = 0, dpr = 1;
-type Seat = { id: number; power: boolean; hold: number; ang: number; on: boolean; srcConn: boolean; earned: boolean; lvl: number };
-type Gear = { id: number; x: number; y: number; vx: number; vy: number; ang: number; va: number; power: boolean; phase: 'rack' | 'fall'; dir: number; dropX: number; stuck: number; earned: boolean; dead?: boolean };
+type Seat = { r: number; c: number; age: number; id: number; power: boolean; hold: number; ang: number; on: boolean; srcConn: boolean; earned: boolean; lvl: number };
+type Gear = { id: number; x: number; y: number; vx: number; vy: number; ang: number; va: number; power: boolean; phase: 'rack' | 'fall'; dir: number; dropX: number; stuck: number; earned: boolean; dead?: boolean; skip?: string; skipT?: number };
 type Mill = { r: number; c: number; upperDone: boolean; born: number };
-let pins: boolean[][], edge: Map<string, boolean>, seats: (Seat | null)[][], gears: Gear[], wms: Mill[];
+let pins: boolean[][], edge: Map<string, boolean>, seats: Map<string, Seat>, gears: Gear[], wms: Mill[];
 let mill = { r: 0, c: 0 };
-let anteLeft = 0, queue = 0, bin = 0, credit = 0, spawned = 0, lost = 0, reclaims = 0, nextId = 1;
+let detached = 0, anteLeft = 0, queue = 0, bin = 0, credit = 0, spawned = 0, lost = 0, reclaims = 0, nextId = 1;
 let spawnT = 0, score = 0, time = 0, over = false, won = false, playing = false, flash = 0, wmAng = 0, millAng = 0, millSpin = 0, toast = '', toastT = 0;
 let best = +(localStorage.getItem('gearmill.best') || 0);
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
 const ri = (a: number, b: number) => Math.floor(rnd(a, b + 1));
 const inG = (r: number, c: number) => r >= 0 && c >= 0 && r < N && c < N;
 const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+const SLOT_CATCH = 70 * Math.PI / 180, SLOT_UP_TOL = 25 * Math.PI / 180, SETTLE_RATE = 1.4, SETTLE_GRACE = 1.0;
+const K = (r: number, c: number) => r + ',' + c;
+const seatAt = (r: number, c: number) => seats.get(K(r, c));
+const angDiff = (a: number, b: number) => { let d = (a - b) % (Math.PI * 2); if (d > Math.PI) d -= Math.PI * 2; if (d < -Math.PI) d += Math.PI * 2; return d; };
 
 function resize() {
   dpr = window.devicePixelRatio || 1;
@@ -38,14 +42,14 @@ const ey = (r: number) => r < 0 ? oy - cs * 0.42 : r >= N ? oy + N * cs + cs * 0
 const edgeKeys = () => { const k: [number, number][] = []; for (let i = 0; i < N; i++) k.push([-1, i], [N, i], [i, -1], [i, N]); return k; };
 
 function freeSquare(avoid: (r: number, c: number) => boolean) {
-  for (let t = 0; t < 200; t++) { const r = ri(0, N - 1), c = ri(0, N - 1); if (!locked(r, c) && !seats[r][c] && !avoid(r, c)) return { r, c }; }
+  for (let t = 0; t < 200; t++) { const r = ri(0, N - 1), c = ri(0, N - 1); if (!locked(r, c) && !seatAt(r, c) && !avoid(r, c)) return { r, c }; }
   return null;
 }
 function addWindmill(r: number, c: number) { wms.push({ r, c, upperDone: false, born: time }); pins[r][c] = true; }
 function reset() {
   pins = Array.from({ length: N }, () => Array(N).fill(false));
   edge = new Map(edgeKeys().map(([r, c]) => [r + ',' + c, true]));
-  seats = Array.from({ length: N }, () => Array(N).fill(null));
+  seats = new Map();
   gears = []; wms = [];
   anteLeft = ANTE; queue = 0; bin = 0; credit = 0; spawned = lost = reclaims = 0;
   spawnT = 0; score = 0; time = 0; over = won = false; flash = 0; millSpin = 0; toast = ''; toastT = 0;
@@ -57,8 +61,8 @@ function reset() {
 function say(t: string) { toast = t; toastT = 2.5; }
 
 function releaseSeat(r: number, c: number) {
-  const s = seats[r][c]; if (!s) return; seats[r][c] = null;
-  gears.push({ id: s.id, x: cx(c), y: cy(r), vx: rnd(-20, 20), vy: 10, ang: s.ang, va: 0, power: s.power, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: s.earned });
+  const s = seatAt(r, c); if (!s) return; seats.delete(K(r, c));
+  gears.push({ id: s.id, x: ex(c), y: ey(r), vx: rnd(-15, 15), vy: cs * 0.5, ang: s.ang, va: rnd(-3, 3), power: s.power, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: s.earned, skip: K(r, c), skipT: 0.6 });
 }
 function tap(px: number, py: number) {
   if (!playing || over) return;
@@ -68,7 +72,7 @@ function tap(px: number, py: number) {
   // border post: nearest edge post within ~0.6 cell
   let bestK: [number, number] | null = null, bd = cs * 0.6;
   for (const [er, ec] of edgeKeys()) { const d = Math.hypot(px - ex(ec), py - ey(er)); if (d < bd) { bd = d; bestK = [er, ec]; } }
-  if (bestK) { const k = bestK.join(','); edge.set(k, !edge.get(k)); }
+  if (bestK) { const k = bestK.join(','); edge.set(k, !edge.get(k)); if (!edge.get(k)) releaseSeat(bestK[0], bestK[1]); }
 }
 cv.addEventListener('pointerdown', e => { const b = cv.getBoundingClientRect(); tap(e.clientX - b.left, e.clientY - b.top); });
 
@@ -79,8 +83,25 @@ function spawn() {
   spawned++;
 }
 
+function freePinsNear(x: number, y: number): [number, number][] {
+  const out: [number, number][] = [];
+  const c0 = Math.floor((x - ox) / cs), r0 = Math.floor((y - oy) / cs);
+  for (let r = r0 - 1; r <= r0 + 1; r++) for (let c = c0 - 1; c <= c0 + 1; c++) {
+    const g = inG(r, c), isEdge = !g && edge.has(K(r, c));
+    if ((g && pins[r][c] && !locked(r, c)) || (isEdge && edge.get(K(r, c)))) if (!seatAt(r, c)) out.push([r, c]);
+  }
+  return out;
+}
+// a gear can't slip off if something sits directly below it
+function supported(r: number, c: number) {
+  if (r >= N) return true; // bottom border posts rest on the frame
+  const br = r + 1;
+  if (seatAt(br, c)) return true;
+  if (inG(br, c)) return raised(br, c) || locked(br, c);
+  return br === N && inG(0, c) ? !!edge.get(K(N, c)) : !!edge.get(K(br, c));
+}
 // power graph: nodes are r,c,level. windmills and the mill exist on both levels; seated gears on their own level.
-function nodeAt(r: number, c: number, l: number) { return inG(r, c) && (locked(r, c) || (seats[r][c]?.lvl === l)); }
+function nodeAt(r: number, c: number, l: number) { return (inG(r, c) && locked(r, c)) || seatAt(r, c)?.lvl === l; }
 function bfs(starts: string[]) {
   const seen = new Set(starts), q = [...starts];
   while (q.length) { const [r, c, l] = q.shift()!.split(',').map(Number);
@@ -91,28 +112,30 @@ function power() {
   const wmStarts = wms.flatMap(w => [`${w.r},${w.c},0`, `${w.r},${w.c},1`]);
   const fromWm = bfs(wmStarts);
   const srcs = [...wmStarts];
-  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) { const s = seats[r][c]; if (!s) continue;
+  for (const s of seats.values()) { const { r, c } = s;
     s.srcConn = fromWm.has(`${r},${c},${s.lvl}`); if (s.power && s.srcConn) s.hold = POWER_HOLD; if (s.power && s.hold > 0) srcs.push(`${r},${c},${s.lvl}`); }
   const live = bfs(srcs);
   let n = 0, newly = 0;
-  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) { const s = seats[r][c]; if (!s) continue;
+  for (const s of seats.values()) { const { r, c } = s;
     s.on = live.has(`${r},${c},${s.lvl}`); if (s.on) { n++; if (!s.earned) { s.earned = true; newly++; } } }
   // upper windmill hookup: a turning upper-level gear meshed directly to a windmill's upper gear
   const hooked: Mill[] = [];
-  for (const w of wms) if (!w.upperDone && DIRS.some(([dr, dc]) => { const s = seats[w.r + dr]?.[w.c + dc]; return s && s.lvl === 1 && s.on; })) hooked.push(w);
+  for (const w of wms) if (!w.upperDone && DIRS.some(([dr, dc]) => { const s = seatAt(w.r + dr, w.c + dc); return s && s.lvl === 1 && s.on; })) hooked.push(w);
   const millOn = live.has(`${mill.r},${mill.c},0`) || live.has(`${mill.r},${mill.c},1`);
   return { n, newly, hooked, millOn };
 }
 
+let paused = false, testQuiet = false;
 function step(dt: number) {
+  if (paused) dt = 0;
   wmAng += dt * 2; toastT = Math.max(0, toastT - dt);
   if (!playing) return;
   if (over) { millAng += dt * millSpin; flash = Math.max(0, flash - dt); return; }
   time += dt;
   // levels follow the raise rule; seated gears ride with their square
-  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) { const s = seats[r][c]; if (s) s.lvl = raised(r, c) ? 1 : 0; }
+  for (const s of seats.values()) s.lvl = inG(s.r, s.c) && raised(s.r, s.c) ? 1 : 0;
   spawnT -= dt;
-  if (spawnT <= 0) { if (anteLeft + queue > 0) { spawn(); spawnT += SPAWN; } else spawnT = 0; }
+  if (spawnT <= 0 && !testQuiet) { if (anteLeft + queue > 0) { spawn(); spawnT += SPAWN; } else spawnT = 0; }
   const rollV = cs * (1.5 + pinsUpCount() * 0.08), g = cs * 9, R = cs * 0.42;
   for (const gr of gears) {
     if (gr.phase === 'rack') {
@@ -122,17 +145,27 @@ function step(dt: number) {
     }
     gr.vy += g * dt; gr.vx += rnd(-1, 1) * cs * 2 * dt; gr.vx *= 0.995;
     gr.x += gr.vx * dt; gr.y += gr.vy * dt; gr.ang += gr.va * dt;
-    if (gr.x < ox + R) { gr.x = ox + R; gr.vx = Math.abs(gr.vx) * 0.5; }
-    if (gr.x > ox + N * cs - R) { gr.x = ox + N * cs - R; gr.vx = -Math.abs(gr.vx) * 0.5; }
+    const wl = ox - cs * 0.75 + R, wr = ox + N * cs + cs * 0.75 - R;
+    if (gr.x < wl) { gr.x = wl; gr.vx = Math.abs(gr.vx) * 0.5; gr.va = rnd(-6, 6); }
+    if (gr.x > wr) { gr.x = wr; gr.vx = -Math.abs(gr.vx) * 0.5; gr.va = rnd(-6, 6); }
+    if (gr.skipT) { gr.skipT -= dt; if (gr.skipT <= 0) gr.skip = undefined; }
     const c = Math.floor((gr.x - ox) / cs), r = Math.floor((gr.y - oy) / cs);
-    if (inG(r, c) && pins[r][c] && !seats[r][c] && !locked(r, c) && Math.hypot(gr.x - cx(c), gr.y - cy(r)) < cs * 0.3) {
-      seats[r][c] = { id: gr.id, power: gr.power, hold: 0, ang: gr.ang, on: false, srcConn: false, earned: gr.earned, lvl: raised(r, c) ? 1 : 0 }; gr.dead = true; continue;
+    // slot catch: any free raised pin/post touching the gear where the open slot faces it
+    let caught = false;
+    for (const [pr, pc] of freePinsNear(gr.x, gr.y)) {
+      const px = ex(pc), py = ey(pr), d = Math.hypot(px - gr.x, py - gr.y);
+      if (d < R + cs * 0.14 && K(pr, pc) !== gr.skip && Math.abs(angDiff(Math.atan2(py - gr.y, px - gr.x), gr.ang)) < SLOT_CATCH) {
+        seats.set(K(pr, pc), { r: pr, c: pc, age: 0, id: gr.id, power: gr.power, hold: 0, ang: gr.ang, on: false, srcConn: false, earned: gr.earned, lvl: inG(pr, pc) && raised(pr, pc) ? 1 : 0 });
+        gr.dead = true; caught = true; break;
+      }
     }
+    if (caught) continue;
     const col: [number, number, number][] = [];
     for (let rr = Math.max(0, r - 1); rr <= Math.min(N - 1, r + 1); rr++) for (let cc = Math.max(0, c - 1); cc <= Math.min(N - 1, c + 1); cc++) {
-      if (seats[rr][cc] || locked(rr, cc)) col.push([cx(cc), cy(rr), cs * 0.45]);
-      else if (pins[rr][cc]) col.push([cx(cc), cy(rr), cs * 0.07]);
+      if (locked(rr, cc)) col.push([cx(cc), cy(rr), cs * 0.45]);
     }
+    for (const t of seats.values()) if (Math.abs(ex(t.c) - gr.x) < cs * 1.2 && Math.abs(ey(t.r) - gr.y) < cs * 1.2) col.push([ex(t.c), ey(t.r), cs * 0.45]);
+    for (const [pr, pc] of freePinsNear(gr.x, gr.y)) col.push([ex(pc), ey(pr), cs * 0.1]);
     for (const [px, py, pr] of col) {
       const dx = gr.x - px, dy = gr.y - py, d = Math.hypot(dx, dy), m = R + pr;
       if (d < m && d > 0.01) { const nx = dx / d, ny = dy / d; gr.x = px + nx * m; gr.y = py + ny * m;
@@ -140,10 +173,10 @@ function step(dt: number) {
     }
     if (Math.hypot(gr.vx, gr.vy) < cs * 0.8) { gr.stuck += dt; if (gr.stuck > 0.6) gr.vx += (Math.random() < 0.5 ? -1 : 1) * cs * 3; if (gr.stuck > 3) { gr.dead = true; lost++; bin++; continue; } }
     else gr.stuck = Math.max(0, gr.stuck - dt);
-    if (gr.y > oy + N * cs + cs * 0.9) { gr.dead = true; lost++; bin++; }
+    if (gr.y > oy + N * cs + cs * 1.1) { gr.dead = true; lost++; bin++; }
   }
   gears = gears.filter(g => !g.dead);
-  for (const row of seats) for (const s of row) if (s && s.power && !s.srcConn && s.hold > 0) s.hold = Math.max(0, s.hold - dt);
+  for (const s of seats.values()) if (s && s.power && !s.srcConn && s.hold > 0) s.hold = Math.max(0, s.hold - dt);
   const p = power();
   score += p.n * dt;
   credit += p.newly * REWARD;
@@ -155,9 +188,14 @@ function step(dt: number) {
     flash = 0.6; say(`UPPER LINK! +${back} gears reclaimed${spot ? ' · new windmill' : ''}`);
   }
   const pay = Math.min(bin, credit); if (pay > 0) { bin -= pay; credit -= pay; queue += pay; }
-  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) { const s = seats[r][c]; if (s?.on) s.ang += dt * 2 * ((r + c) % 2 ? -1 : 1); }
+  for (const s of seats.values()) {
+    s.age += dt;
+    if (s.on) s.ang += dt * 2 * ((s.r + s.c) % 2 ? -1 : 1);
+    else if (s.age > SETTLE_GRACE) { const d = angDiff(-Math.PI / 2, s.ang); s.ang += Math.sign(d) * Math.min(Math.abs(d), SETTLE_RATE * dt); } // heavy solid half sinks, slot swings up
+  }
+  for (const s of [...seats.values()]) if (Math.abs(angDiff(s.ang, -Math.PI / 2)) < SLOT_UP_TOL && !supported(s.r, s.c)) { releaseSeat(s.r, s.c); detached++; }
   if (p.millOn) finish(true);
-  else if (anteLeft + queue === 0 && gears.length === 0 && !(credit > 0 && bin > 0)) finish(false);
+  else if (!testQuiet && anteLeft + queue === 0 && gears.length === 0 && !(credit > 0 && bin > 0)) finish(false);
 }
 function finish(w: boolean) {
   over = true; won = w; millSpin = w ? 6 : 0; flash = w ? 1.5 : 0;
@@ -184,8 +222,11 @@ function drawGear(x: number, y: number, ang: number, pw: boolean, on: boolean, h
   gd.addColorStop(0, pw ? '#c8f6ff' : (upper ? '#fff6e0' : '#e8ecf0')); gd.addColorStop(1, pw ? '#1d8fb0' : (on ? (upper ? '#b07a20' : '#8a6a2a') : '#5b6370'));
   ctx.fillStyle = gd; gearPath(x, y, R, 10, ang); ctx.fill(); ctx.shadowBlur = 0;
   ctx.strokeStyle = upper ? '#f0b44c' : '#111'; ctx.lineWidth = upper ? 1.5 : 1; ctx.stroke();
-  ctx.fillStyle = '#20262e'; ctx.beginPath(); ctx.arc(x, y, R * 0.28, 0, 7); ctx.fill();
-  ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.fillStyle = '#0b0d10'; ctx.fillRect(-R * 0.07, -R * 0.62, R * 0.14, R * 0.36); ctx.restore();
+    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+  ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.beginPath(); ctx.arc(0, 0, R * 0.8, Math.PI / 2, Math.PI * 1.5); ctx.fill(); // solid (heavy) half shading
+  ctx.fillStyle = '#0b0d10'; ctx.beginPath(); ctx.moveTo(R * 1.05, -R * 0.2); ctx.lineTo(R * 0.05, -R * 0.2); ctx.arc(R * 0.05, 0, R * 0.2, -Math.PI / 2, Math.PI / 2, true); ctx.lineTo(R * 1.05, R * 0.2); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#f0b44c'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(R * 0.95, -R * 0.2); ctx.lineTo(R * 0.05, -R * 0.2); ctx.arc(R * 0.05, 0, R * 0.2, -Math.PI / 2, Math.PI / 2, true); ctx.lineTo(R * 0.95, R * 0.2); ctx.stroke();
+  ctx.restore();
   if (hold > 0) { ctx.strokeStyle = '#5fe0ff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, R * 1.05, -Math.PI / 2, -Math.PI / 2 + (hold / POWER_HOLD) * Math.PI * 2); ctx.stroke(); }
 }
 function draw() {
@@ -211,7 +252,7 @@ function draw() {
   }
   for (const [er, ec] of edgeKeys()) { const on = edge.get(er + ',' + ec); ctx.fillStyle = on ? '#c9a24a' : '#2c323a'; ctx.beginPath(); ctx.arc(ex(ec), ey(er), on ? cs * 0.13 : cs * 0.08, 0, 7); ctx.fill(); }
   ctx.fillStyle = '#1c2128'; ctx.fillRect(ox, oy + bw + cs * 0.85, bw, 22); ctx.fillStyle = '#7a8494'; ctx.font = '11px system-ui'; ctx.fillText(`▼ BIN ${bin} · binned total ${lost}`, ox + 8, oy + bw + cs * 0.85 + 15);
-  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) { const s = seats[r][c]; if (s) drawGear(cx(c), cy(r), s.ang, s.power, s.on, s.power && !s.srcConn ? s.hold : 0, s.lvl === 1); }
+  for (const s of seats.values()) { if (s) drawGear(ex(s.c), ey(s.r), s.ang, s.power, s.on, s.power && !s.srcConn ? s.hold : 0, s.lvl === 1); }
   for (const w of wms) {
     const x = cx(w.c), y = cy(w.r);
     drawGear(x, y, wmAng, false, true);                       // floor gear
@@ -236,9 +277,11 @@ document.getElementById('again')!.onclick = () => { document.getElementById('ove
 if (import.meta.env.DEV) {
   (window as any).__gm = {
     tap, raised, pinUp,
-    seat(r: number, c: number, pw = false) { pins[r][c] = true; seats[r][c] = { id: nextId++, power: pw, hold: 0, ang: 0, on: false, srcConn: false, earned: false, lvl: raised(r, c) ? 1 : 0 }; },
+    seat(r: number, c: number, pw = false, ang = Math.PI / 2) { if (inG(r, c)) pins[r][c] = true; else edge.set(K(r, c), true); seats.set(K(r, c), { r, c, age: 0, ang, id: nextId++, power: pw, hold: 0, on: false, srcConn: false, earned: false, lvl: inG(r, c) && raised(r, c) ? 1 : 0 }); },
+    drop(x: number, y: number, ang: number, vx = 0, vy = 0) { gears.push({ id: nextId++, x, y, vx, vy, ang, va: 0, power: false, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: false }); },
+    pause(v: boolean) { paused = v; }, quiet(v: boolean) { testQuiet = v; }, ex, ey, supported,
     setPin(r: number, c: number, v: boolean) { if (inG(r, c)) pins[r][c] = v; else edge.set(r + ',' + c, v); },
     addBin(n: number) { bin += n; },
-    get state() { return { score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, seats: seats.flatMap((row, r) => row.map((s, c) => s && { r, c, lvl: s.lvl, on: s.on })).filter(Boolean) }; },
+    get state() { return { score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang })) }; },
   };
 }
