@@ -20,7 +20,7 @@ const rnd = (a: number, b: number) => a + Math.random() * (b - a);
 const ri = (a: number, b: number) => Math.floor(rnd(a, b + 1));
 const inG = (r: number, c: number) => r >= 0 && c >= 0 && r < N && c < N;
 const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-const SLOT_CATCH = 70 * Math.PI / 180, SLOT_UP_TOL = 25 * Math.PI / 180, SETTLE_RATE = 1.4, SETTLE_GRACE = 1.0;
+const SLOT_CATCH = 80 * Math.PI / 180, SLOT_UP_TOL = 25 * Math.PI / 180, SETTLE_RATE = 0.7, SETTLE_GRACE = 2.0;
 const K = (r: number, c: number) => r + ',' + c;
 const seatAt = (r: number, c: number) => seats.get(K(r, c));
 const angDiff = (a: number, b: number) => { let d = (a - b) % (Math.PI * 2); if (d > Math.PI) d -= Math.PI * 2; if (d < -Math.PI) d += Math.PI * 2; return d; };
@@ -40,12 +40,20 @@ const locked = (r: number, c: number) => isWm(r, c) || isMill(r, c);
 const pinUp = (r: number, c: number) => inG(r, c) ? pins[r][c] : !!edge.get(r + ',' + c);
 const pinRaised = (r: number, c: number) => DIRS.every(([dr, dc]) => pinUp(r + dr, c + dc));
 const postDown = (r: number, c: number) => edge.get(K(r, c)) === false;
-// ROW RAISE: two adjacent border posts down on a side lift the rows/columns beside them
-const pairDown = (a: [number, number], b1: [number, number], b2: [number, number]) => postDown(...a) && (postDown(...b1) || postDown(...b2));
-const forced = (r: number, c: number) =>
-  pairDown([r, -1], [r - 1, -1], [r + 1, -1]) || pairDown([r, N], [r - 1, N], [r + 1, N]) ||
-  pairDown([-1, c], [-1, c - 1], [-1, c + 1]) || pairDown([N, c], [N, c - 1], [N, c + 1]);
-const raised = (r: number, c: number) => pinRaised(r, c) || forced(r, c);
+// ROW/COLUMN FLIP: opposite border posts pair up (left r <-> right r, top c <-> bottom c).
+// Lowering the second post of a pair inverts every square in that line (XOR with the pin rule).
+let flip: boolean[][] = [], sweeps: { row: boolean; i: number; t: number }[] = [];
+const partner = (r: number, c: number): [number, number] => c < 0 ? [r, N] : c >= N ? [r, -1] : r < 0 ? [N, c] : [-1, c];
+function setEdge(r: number, c: number, v: boolean) {
+  const k = K(r, c); if (!edge.has(k) || edge.get(k) === v) return;
+  edge.set(k, v);
+  if (!v) { releaseSeat(r, c); const [pr, pc] = partner(r, c); if (postDown(pr, pc)) {
+    const row = c < 0 || c >= N, i = row ? r : c;
+    for (let j = 0; j < N; j++) { const rr = row ? i : j, cc = row ? j : i; flip[rr][cc] = !flip[rr][cc]; }
+    sweeps.push({ row, i, t: 0 }); say(`${row ? 'ROW' : 'COLUMN'} ${i + 1} FLIPPED`);
+  } }
+}
+const raised = (r: number, c: number) => pinRaised(r, c) !== !!flip[r]?.[c];
 const pinsUpCount = () => pins.flat().filter(Boolean).length + [...edge.values()].filter(Boolean).length;
 const cx = (c: number) => ox + (c + 0.5) * cs, cy = (r: number) => oy + (r + 0.5) * cs;
 // edge posts sit just outside the grid, at the virtual neighbour position (half a cell out so they fit on screen)
@@ -59,6 +67,7 @@ function freeSquare(avoid: (r: number, c: number) => boolean) {
 }
 function addWindmill(r: number, c: number) { wms.push({ r, c, upperDone: false, born: time, dir: Math.random() < 0.5 ? 1 : -1 }); pins[r][c] = true; }
 function reset() {
+  flip = Array.from({ length: N }, () => Array(N).fill(false)); sweeps = [];
   pins = Array.from({ length: N }, () => Array(N).fill(false));
   edge = new Map(edgeKeys().map(([r, c]) => [r + ',' + c, true]));
   seats = new Map();
@@ -84,7 +93,7 @@ function tap(px: number, py: number) {
   // border post: nearest edge post within ~0.6 cell
   let bestK: [number, number] | null = null, bd = cs * 0.6;
   for (const [er, ec] of edgeKeys()) { const d = Math.hypot(px - ex(ec), py - ey(er)); if (d < bd) { bd = d; bestK = [er, ec]; } }
-  if (bestK) { const k = bestK.join(','); if (seatAt(bestK[0], bestK[1])) { releaseSeat(bestK[0], bestK[1]); return; } edge.set(k, !edge.get(k)); }
+  if (bestK) { const k = bestK.join(','); if (seatAt(bestK[0], bestK[1])) { releaseSeat(bestK[0], bestK[1]); return; } setEdge(bestK[0], bestK[1], !edge.get(k)); }
 }
 cv.addEventListener('pointerdown', e => { const b = cv.getBoundingClientRect(); tap(e.clientX - b.left, e.clientY - b.top); });
 
@@ -174,6 +183,7 @@ let paused = false, testQuiet = false;
 function step(dt: number) {
   if (paused) dt = 0;
   wmAng += dt * 2; postAng += dt * 2;
+  for (const w of sweeps) w.t += dt; sweeps = sweeps.filter(w => w.t < 0.8);
   for (const k of sparks) { k.t -= dt; k.x += k.vx * dt; k.y += k.vy * dt; k.vy += cs * 8 * dt; }
   sparks = sparks.filter(k => k.t > 0);
   if (dt > 0) {
@@ -329,7 +339,17 @@ function draw() {
   ctx.fillStyle = '#111'; ctx.font = `bold ${cs * 0.28}px system-ui`; ctx.fillText('M', mx - cs * 0.12, my + cs * 0.1);
   for (const g of gears) drawGear(g.x, g.y, g.ang, g.power, false);
   for (const k of sparks) { ctx.strokeStyle = k.col; ctx.lineWidth = 3; ctx.shadowColor = "#ffb000"; ctx.shadowBlur = 6; ctx.beginPath(); ctx.moveTo(k.x, k.y); ctx.lineTo(k.x - k.vx * 0.05, k.y - k.vy * 0.05); ctx.stroke(); } ctx.shadowBlur = 0;
-  if (toastT > 0) { ctx.globalAlpha = Math.min(1, toastT); ctx.fillStyle = '#1b2a1e'; ctx.fillRect(10, oy + bw / 2 - 18, W - 20, 30); ctx.fillStyle = '#7dff9a'; ctx.font = 'bold 14px system-ui'; ctx.fillText(toast, 20, oy + bw / 2 + 2); ctx.globalAlpha = 1; }
+  // pair cue: one post of a pair down -> pulse its partner as the target
+  for (const [er, ec] of edgeKeys()) if (postDown(er, ec)) { const [pr, pc] = partner(er, ec); if (!postDown(pr, pc)) {
+    const a = 0.5 + 0.5 * Math.sin(performance.now() / 150);
+    ctx.strokeStyle = `rgba(80,220,255,${0.4 + 0.6 * a})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(ex(pc), ey(pr), cs * (0.2 + 0.08 * a), 0, 7); ctx.stroke();
+    ctx.setLineDash([4, 6]); ctx.strokeStyle = 'rgba(80,220,255,.25)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(ex(ec), ey(er)); ctx.lineTo(ex(pc), ey(pr)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(80,220,255,.8)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(ex(ec), ey(er), cs * 0.16, 0, 7); ctx.stroke(); } }
+  for (const w of sweeps) { const f = w.t / 0.8, gw = ctx.createLinearGradient(0, 0, 1, 0); void gw;
+    ctx.fillStyle = `rgba(120,230,255,${0.5 * (1 - f)})`;
+    if (w.row) { const x = ox + f * N * cs; ctx.fillRect(ox, oy + w.i * cs, x - ox, cs); ctx.fillStyle = `rgba(255,255,255,${1 - f})`; ctx.fillRect(x - 4, oy + w.i * cs, 8, cs); }
+    else { const y = oy + f * N * cs; ctx.fillRect(ox + w.i * cs, oy, cs, y - oy); ctx.fillStyle = `rgba(255,255,255,${1 - f})`; ctx.fillRect(ox + w.i * cs, y - 4, cs, 8); } }
+  if (toastT > 0) { ctx.globalAlpha = Math.min(1, toastT); ctx.fillStyle = '#1b2a1e'; ctx.fillRect(10, oy + bw + cs * 0.85 + 28, W - 20, 30); ctx.fillStyle = '#7dff9a'; ctx.font = 'bold 14px system-ui'; ctx.fillText(toast, 20, oy + bw + cs * 0.85 + 48); ctx.globalAlpha = 1; }
   if (flash > 0) { ctx.fillStyle = `rgba(255,220,120,${flash * 0.35})`; ctx.fillRect(0, 0, W, H); }
 }
 let last = performance.now();
@@ -344,7 +364,7 @@ if (import.meta.env.DEV) {
     seat(r: number, c: number, pw = false, ang = Math.PI / 2) { if (inG(r, c)) pins[r][c] = true; else edge.set(K(r, c), true); seats.set(K(r, c), { r, c, age: 0, ang, id: nextId++, power: pw, hold: 0, on: false, srcConn: false, earned: false, dir: 0, jam: false, lvl: inG(r, c) && raised(r, c) ? 1 : 0 }); },
     drop(x: number, y: number, ang: number, vx = 0, vy = 0) { gears.push({ id: nextId++, x, y, vx, vy, ang, va: 0, power: false, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: false }); },
     pause(v: boolean) { paused = v; }, quiet(v: boolean) { testQuiet = v; }, ex, ey, supported,
-    setPin(r: number, c: number, v: boolean) { if (inG(r, c)) pins[r][c] = v; else edge.set(r + ',' + c, v); },
+    setPin(r: number, c: number, v: boolean) { if (inG(r, c)) pins[r][c] = v; else setEdge(r, c, v); },
     addBin(n: number) { bin += n; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
     get state() { return { score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, postDir: Object.fromEntries(postDir), jamSides: [...jamSides], jamLinks, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang, dir: s.dir, jam: s.jam })) }; },
   };
