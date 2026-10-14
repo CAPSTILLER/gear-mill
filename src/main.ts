@@ -85,7 +85,7 @@ function reset() {
   seats = new Map();
   gears = []; wms = [];
   anteLeft = ANTE; queue = 0; bin = 0; credit = 0; spawned = lost = reclaims = 0;
-  holeT = 0; sweepNext = SWEEP_EVERY; sweep = null; sweepPost = '';
+  rowCd = { T: 0, B: 0 }; holeT = 0; sweepNext = SWEEP_EVERY; sweep = null; sweepPost = '';
   spawnT = 0; score = 0; time = 0; over = won = false; flash = 0; millSpin = 0; toast = ''; toastT = 0;
   const d = { r: ri(0, 1), c: ri(0, N - 1) };
   addWindmill(d.r, d.c);
@@ -98,8 +98,45 @@ function releaseSeat(r: number, c: number) {
   const s = seatAt(r, c); if (!s) return; seats.delete(K(r, c));
   gears.push({ id: s.id, x: ex(c), y: ey(r), vx: rnd(-15, 15), vy: cs * 0.5, ang: s.ang, va: rnd(-3, 3), power: s.power, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: s.earned, skip: K(r, c), skipT: 0.6 });
 }
+// no-overlap: a gear may only seat if no other gear body would overlap it (meshing distance ~1 cell is fine)
+function seatClear(r: number, c: number, self: Gear) {
+  const x = ex(c), y = ey(r);
+  for (const t of seats.values()) if (Math.hypot(ex(t.c) - x, ey(t.r) - y) < cs * 0.9) return false;
+  for (const w of [...wms, mill]) if (!(w.r === r && w.c === c) && Math.hypot(cx(w.c) - x, cy(w.r) - y) < cs * 0.9) return false;
+  for (const g of gears) if (g !== self && !g.dead && Math.hypot(g.x - x, g.y - y) < cs * 0.84) return false;
+  return true;
+}
+// loose gears collide with each other (rack gears that bump just drop early)
+function separateLoose() {
+  const m = cs * 0.84;
+  const statics = [...[...seats.values()].map(t => [ex(t.c), ey(t.r)]), ...wms.map(w => [cx(w.c), cy(w.r)]), [cx(mill.c), cy(mill.r)]];
+  for (let it = 0; it < 6; it++) {
+  for (const g of gears) if (g.phase === 'fall') for (const [sx, sy] of statics) {
+    const dx = g.x - sx, dy = g.y - sy, d = Math.hypot(dx, dy), ms = cs * 0.87;
+    if (d < ms) { const nx = d > 1e-6 ? dx / d : 0, ny = d > 1e-6 ? dy / d : -1; g.x = sx + nx * ms; g.y = sy + ny * ms; const vn = g.vx * nx + g.vy * ny; if (vn < 0) { g.vx -= vn * nx; g.vy -= vn * ny; } }
+  }
+  for (let i = 0; i < gears.length; i++) for (let j = i + 1; j < gears.length; j++) {
+    const a = gears[i], b = gears[j]; const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy);
+    if (d >= m) continue;
+    if (a.phase === 'rack' || b.phase === 'rack') { for (const g of [a, b]) if (g.phase === 'rack') { g.phase = 'fall'; g.vx = g.dir * cs; g.vy = 0; } }
+    const nx = d > 1e-6 ? dx / d : 1, ny = d > 1e-6 ? dy / d : 0, push = (m - d) / 2;
+    a.x -= nx * push; a.y -= ny * push; b.x += nx * push; b.y += ny * push;
+    const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+    if (rv < 0) { const imp = -rv * 0.65; a.vx -= nx * imp; a.vy -= ny * imp; b.vx += nx * imp; b.vy += ny * imp; a.va = rnd(-5, 5); b.va = rnd(-5, 5); }
+  }
+  }
+}
+// row buttons: arrows in the top-left / bottom-left board corners toggle that whole border row
+const ROW_CD = 1.0; let rowCd = { T: 0, B: 0 } as Record<'T' | 'B', number>;
+const rowBtn = (sd: 'T' | 'B') => ({ x: ox - cs * 0.42, y: sd === 'T' ? oy - cs * 0.42 : oy + N * cs + cs * 0.42 });
+function rowToggle(sd: 'T' | 'B') {
+  if (rowCd[sd] > 0) return false; rowCd[sd] = ROW_CD;
+  const r = sd === 'T' ? -1 : N; for (let c = 0; c < N; c++) setEdge(r, c, !edge.get(K(r, c)));
+  return true;
+}
 function tap(px: number, py: number) {
   if (!playing || over) return;
+  for (const sd of ['T', 'B'] as const) { const b = rowBtn(sd); if (Math.hypot(px - b.x, py - b.y) < cs * 0.62 && Math.abs(px - b.x) < cs * 0.62) { rowToggle(sd); return; } }
   const fx = (px - ox) / cs, fy = (py - oy) / cs;
   const c = Math.floor(fx), r = Math.floor(fy);
   if (inG(r, c)) { if (locked(r, c)) return; pins[r][c] = !pins[r][c]; if (!pins[r][c]) releaseSeat(r, c); return; }
@@ -195,7 +232,7 @@ function power() {
 let paused = false, testQuiet = false;
 function step(dt: number) {
   if (paused) dt = 0;
-  wmAng += dt * 2; postAng += dt * 2;
+  wmAng += dt * 2; postAng += dt * 2; rowCd.T = Math.max(0, rowCd.T - dt); rowCd.B = Math.max(0, rowCd.B - dt);
   for (const w of sweeps) w.t += dt; sweeps = sweeps.filter(w => w.t < 0.8);
   for (const k of sparks) { k.t -= dt; k.x += k.vx * dt; k.y += k.vy * dt; k.vy += cs * 8 * dt; }
   sparks = sparks.filter(k => k.t > 0);
@@ -239,7 +276,7 @@ function step(dt: number) {
     for (const [pr, pc] of freePinsNear(gr.x, gr.y)) {
       const px = ex(pc), py = ey(pr), d = Math.hypot(px - gr.x, py - gr.y);
       const reach = inG(pr, pc) && raised(pr, pc) ? R + cs * 0.56 : R + cs * 0.14;
-      if (d < reach && K(pr, pc) !== gr.skip && (holeT > 0 || Math.abs(angDiff(Math.atan2(py - gr.y, px - gr.x), gr.ang)) < SLOT_CATCH)) {
+      if (d < reach && K(pr, pc) !== gr.skip && seatClear(pr, pc, gr) && (holeT > 0 || Math.abs(angDiff(Math.atan2(py - gr.y, px - gr.x), gr.ang)) < SLOT_CATCH)) {
         seats.set(K(pr, pc), { r: pr, c: pc, age: 0, id: gr.id, power: gr.power, hold: 0, ang: gr.ang, on: false, srcConn: false, earned: gr.earned, dir: 0, jam: false, lvl: inG(pr, pc) && raised(pr, pc) ? 1 : 0 });
         gr.dead = true; caught = true; break;
       }
@@ -282,6 +319,7 @@ function step(dt: number) {
     if (gr.y > oy + N * cs + cs * 1.1) { gr.dead = true; lost++; bin++; }
   }
   gears = gears.filter(g => !g.dead);
+  separateLoose();
   for (const s of seats.values()) if (s && s.power && !s.srcConn && s.hold > 0) s.hold = Math.max(0, s.hold - dt);
   const p = power();
   score += p.n * dt;
@@ -342,7 +380,7 @@ function drawGear(x: number, y: number, ang: number, pw: boolean, on: boolean, h
 function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#0b0d10'; ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = '#f0b44c'; ctx.font = 'bold 18px system-ui'; ctx.fillText('⚙ GEAR MILL', 10, 22);
+  ctx.fillStyle = '#f0b44c'; ctx.font = 'bold 18px system-ui'; ctx.fillText('MILL', 100, 22);
   ctx.font = '13px system-ui'; ctx.fillStyle = '#dfe6ee';
   ctx.fillText(`Score ${Math.floor(score)}`, 10, 42); ctx.fillText(`Best ${best}`, 110, 42); ctx.fillText(`Pins ${pinsUpCount()}`, 200, 42); ctx.fillText(`${time.toFixed(0)}s`, W - 40, 22);
   ctx.fillText(`Ante ${anteLeft}`, 10, 60); ctx.fillText(`Queue ${queue}`, 90, 60); ctx.fillText(`Bin ${bin}`, 180, 60);
@@ -391,6 +429,10 @@ function draw() {
   for (const k of sparks) { ctx.strokeStyle = k.col; ctx.lineWidth = 3; ctx.shadowColor = "#ffb000"; ctx.shadowBlur = 6; ctx.beginPath(); ctx.moveTo(k.x, k.y); ctx.lineTo(k.x - k.vx * 0.05, k.y - k.vy * 0.05); ctx.stroke(); } ctx.shadowBlur = 0;
   if (sweepPost) { const [r, c] = sweepPost.split(',').map(Number); const a = 0.5 + 0.5 * Math.sin(performance.now() / 90);
     ctx.fillStyle = `rgba(80,220,255,${0.35 + 0.4 * a})`; ctx.beginPath(); ctx.arc(ex(c), ey(r), cs * 0.32, 0, 7); ctx.fill(); }
+  for (const sd of ['T', 'B'] as const) { const b = rowBtn(sd), rd = cs * 0.36, cd = rowCd[sd] / ROW_CD;
+    ctx.fillStyle = cd > 0 ? '#2a3038' : '#50dcff'; ctx.beginPath(); ctx.arc(b.x, b.y, rd, 0, 7); ctx.fill();
+    if (cd > 0) { ctx.strokeStyle = '#50dcff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(b.x, b.y, rd, -Math.PI / 2, -Math.PI / 2 + (1 - cd) * Math.PI * 2); ctx.stroke(); }
+    ctx.fillStyle = cd > 0 ? '#6b7585' : '#0b0d10'; ctx.beginPath(); ctx.moveTo(b.x + rd * 0.55, b.y); ctx.lineTo(b.x - rd * 0.35, b.y - rd * 0.5); ctx.lineTo(b.x - rd * 0.35, b.y + rd * 0.5); ctx.closePath(); ctx.fill(); }
   // pair cue: one post of a pair down -> pulse its partner as the target
   for (const [er, ec] of edgeKeys()) if (postDown(er, ec)) { const [pr, pc] = partner(er, ec); if (!postDown(pr, pc)) {
     const a = 0.5 + 0.5 * Math.sin(performance.now() / 150);
@@ -417,7 +459,7 @@ if (import.meta.env.DEV) {
     drop(x: number, y: number, ang: number, vx = 0, vy = 0) { gears.push({ id: nextId++, x, y, vx, vy, ang, va: 0, power: false, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: false }); },
     pause(v: boolean) { paused = v; }, quiet(v: boolean) { testQuiet = v; }, ex, ey, supported,
     setPin(r: number, c: number, v: boolean) { if (inG(r, c)) pins[r][c] = v; else setEdge(r, c, v); },
-    addBin(n: number) { bin += n; }, buyHole, setTime(t: number) { time = t; }, setHole(t: number) { holeT = t; }, setQueue(n: number) { queue = n; }, setCredit(n: number) { credit = n; }, order: sweepOrder, edgeUp(r: number, c: number) { return edge.get(K(r, c)); }, flipAt(r: number, c: number) { return flip[r][c]; }, gearsInfo() { return gears.map(g => ({ x: g.x, y: g.y, vx: g.vx, vy: g.vy, phase: g.phase })); }, flipRow(r: number) { for (let c = 0; c < N; c++) flip[r][c] = !flip[r][c]; }, flipCell(r: number, c: number) { flip[r][c] = !flip[r][c]; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
+    addBin(n: number) { bin += n; }, rowBtn, overlaps() { const L: string[] = []; const all = [...gears.map(g => [g.x, g.y]), ...[...seats.values()].map(t => [ex(t.c), ey(t.r)]), ...wms.map(w => [cx(w.c), cy(w.r)]), [cx(mill.c), cy(mill.r)]]; for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) { const d = Math.hypot(all[i][0] - all[j][0], all[i][1] - all[j][1]); if (d < cs * 0.8) L.push((d / cs).toFixed(2)); } return L; }, buyHole, setTime(t: number) { time = t; }, setHole(t: number) { holeT = t; }, setQueue(n: number) { queue = n; }, setCredit(n: number) { credit = n; }, order: sweepOrder, edgeUp(r: number, c: number) { return edge.get(K(r, c)); }, flipAt(r: number, c: number) { return flip[r][c]; }, gearsInfo() { return gears.map(g => ({ x: g.x, y: g.y, vx: g.vx, vy: g.vy, phase: g.phase })); }, flipRow(r: number) { for (let c = 0; c < N; c++) flip[r][c] = !flip[r][c]; }, flipCell(r: number, c: number) { flip[r][c] = !flip[r][c]; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
     get state() { return { flash, holeT, sweep: sweep && { ...sweep }, sweepPost, sweepNext, time, score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, postDir: Object.fromEntries(postDir), jamSides: [...jamSides], jamLinks, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang, dir: s.dir, jam: s.jam })) }; },
   };
 }
