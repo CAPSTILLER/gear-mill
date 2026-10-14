@@ -31,6 +31,7 @@ let best = +(localStorage.getItem('gearmill.best') || 0);
 // TICK = 1/64 s is exactly representable in binary floating point, so every timer that is decremented/incremented by TICK
 // (clock, hole gears, sweep, lever cooldown, power hold, sag grace...) stays an exact multiple of one tick: effectively an integer tick count.
 const TICK = 1 / 64;
+const FRAME = 1.05; // visual frame margin (cells) beyond the grid edge: posts (0.42) + a full gear (0.5) + margin
 let det = false, rngState = 1, tick = 0, acc = 0, viewK = 1, detSeed = 0;
 type Act = { a: 'pin' | 'post'; r: number; c: number } | { a: 'lever'; sd: 'T' | 'B' } | { a: 'hole' };
 type LogEv = { t: number } & Act;
@@ -52,8 +53,8 @@ function resize() {
     W = 412; H = 860; viewK = Math.min(window.innerWidth / W, window.innerHeight / H) || 1;
   } else { W = Math.min(window.innerWidth, 520); H = window.innerHeight; viewK = 1; }
   cv.width = W * dpr * viewK; cv.height = H * dpr * viewK; cv.style.width = W * viewK + 'px'; cv.style.height = H * viewK + 'px';
-  cs = Math.min((W - 16) / (N + 1), (H - 210) / (N + 1));
-  ox = (W - cs * N) / 2; rackY = 100; oy = rackY + cs * 1.3;
+  cs = Math.min((W - 12) / (N + 2.1), (H - 250) / (N + 2.2)); // v11: room for a 1-cell frame margin on every side
+  ox = (W - cs * N) / 2; rackY = 100; oy = rackY + cs * 1.75; // v11: frame top sits below the rack
 }
 window.addEventListener('resize', resize); resize();
 
@@ -210,7 +211,8 @@ function bfs(starts: string[]) {
 const sideOf = (r: number, c: number) => r < 0 ? 'T' : r >= N ? 'B' : c < 0 ? 'L' : c >= N ? 'R' : '';
 const sideIdx = (r: number, c: number) => (r < 0 || r >= N) ? c : r;
 const sideKey = (sd: string, i: number) => sd === 'T' ? K(-1, i) : sd === 'B' ? K(N, i) : sd === 'L' ? K(i, -1) : K(i, N);
-const nbrs = (k: string) => { const [r, c, l] = k.split(',').map(Number); return DIRS.map(([dr, dc]) => [r + dr, c + dc, l]).filter(([a, b, l2]) => nodeAt(a, b, l2)).map(v => v.join(',')); };
+// v11: windmills' UPPER gears never mesh with each other (two windmills side by side only grind on the floor level)
+const nbrs = (k: string) => { const [r, c, l] = k.split(',').map(Number); const wmHere = l === 1 && inG(r, c) && isWm(r, c); return DIRS.map(([dr, dc]) => [r + dr, c + dc, l]).filter(([a, b, l2]) => nodeAt(a, b, l2) && !(wmHere && isWm(a, b))).map(v => v.join(',')); };
 // direction solve: multi-driver BFS 2-colouring; any component with a conflict jams
 function solve(drivers: Map<string, number>) {
   const dir = new Map(drivers), q = [...drivers.keys()], conflicts: [string, string][] = [];
@@ -438,8 +440,8 @@ function draw() {
   ctx.fillStyle = '#6b7585'; for (let x = 0; x < W; x += 8) ctx.fillRect(x, rackY + cs * 0.42 - 3, 4, 3);
   const bw = cs * N;
   const bg = ctx.createLinearGradient(0, oy, 0, oy + bw); bg.addColorStop(0, '#2a3038'); bg.addColorStop(1, '#14181d');
-  ctx.fillStyle = bg; ctx.fillRect(ox - cs * 0.75, oy - cs * 0.75, bw + cs * 1.5, bw + cs * 1.5);
-  ctx.strokeStyle = '#4a5260'; ctx.lineWidth = 2; ctx.strokeRect(ox - cs * 0.75, oy - cs * 0.75, bw + cs * 1.5, bw + cs * 1.5);
+  ctx.fillStyle = bg; ctx.fillRect(ox - cs * FRAME, oy - cs * FRAME, bw + cs * FRAME * 2, bw + cs * FRAME * 2);
+  ctx.strokeStyle = '#4a5260'; ctx.lineWidth = 2; ctx.strokeRect(ox - cs * FRAME, oy - cs * FRAME, bw + cs * FRAME * 2, bw + cs * FRAME * 2);
   for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
     const x = ox + c * cs, y = oy + r * cs, up = raised(r, c);
     if (up) { ctx.fillStyle = '#56606f'; ctx.fillRect(x + 2, y + 2, cs - 4, cs - 4); ctx.fillStyle = '#7d8aa0'; ctx.fillRect(x + 2, y + 2, cs - 4, 3); ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.fillRect(x + 2, y + cs - 5, cs - 4, 3); }
@@ -451,7 +453,7 @@ function draw() {
     if (pd) { ctx.save(); ctx.translate(x, y); ctx.rotate(postAng * pd); ctx.strokeStyle = '#3a2a08'; ctx.lineWidth = 2; for (let i = 0; i < 3; i++) { ctx.rotate(Math.PI / 3); ctx.beginPath(); ctx.moveTo(-cs * 0.13, 0); ctx.lineTo(cs * 0.13, 0); ctx.stroke(); } ctx.restore();
       ctx.strokeStyle = 'rgba(255,214,110,.7)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, cs * 0.19, postAng * pd, postAng * pd + 4.5); ctx.stroke(); }
     if (jamSides.has(sideOf(er, ec))) { ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, cs * 0.17, 0, 7); ctx.stroke(); } }
-  ctx.fillStyle = '#1c2128'; ctx.fillRect(ox, oy + bw + cs * 0.85, bw, 22); ctx.fillStyle = '#7a8494'; ctx.font = '11px system-ui'; ctx.fillText(`▼ BIN ${bin} · binned total ${lost}`, ox + 8, oy + bw + cs * 0.85 + 15);
+  ctx.fillStyle = '#1c2128'; ctx.fillRect(ox, oy + bw + cs * (FRAME + 0.15), bw, 22); ctx.fillStyle = '#7a8494'; ctx.font = '11px system-ui'; ctx.fillText(`▼ BIN ${bin} · binned total ${lost}`, ox + 8, oy + bw + cs * (FRAME + 0.15) + 15);
   for (const s of seats.values()) drawGear(ex(s.c), ey(s.r), s.ang, s.power, s.on, s.power && !s.srcConn ? s.hold : 0, s.lvl === 1, 1, holeT === 0, s.jam);
   for (const [u, v] of jamLinks) { const [r1, c1] = u.split(',').map(Number), [r2, c2] = v.split(',').map(Number);
     ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(ex(c1), ey(r1)); ctx.lineTo(ex(c2), ey(r2)); ctx.stroke();
@@ -496,7 +498,7 @@ function draw() {
     ctx.fillStyle = `rgba(120,230,255,${0.5 * (1 - f)})`;
     if (w.row) { const x = ox + f * N * cs; ctx.fillRect(ox, oy + w.i * cs, x - ox, cs); ctx.fillStyle = `rgba(255,255,255,${1 - f})`; ctx.fillRect(x - 4, oy + w.i * cs, 8, cs); }
     else { const y = oy + f * N * cs; ctx.fillRect(ox + w.i * cs, oy, cs, y - oy); ctx.fillStyle = `rgba(255,255,255,${1 - f})`; ctx.fillRect(ox + w.i * cs, y - 4, cs, 8); } }
-  if (toastT > 0) { ctx.globalAlpha = Math.min(1, toastT); ctx.fillStyle = '#1b2a1e'; ctx.fillRect(10, oy + bw + cs * 0.85 + 28, W - 20, 30); ctx.fillStyle = '#7dff9a'; ctx.font = 'bold 14px system-ui'; ctx.fillText(toast, 20, oy + bw + cs * 0.85 + 48); ctx.globalAlpha = 1; }
+  if (toastT > 0) { ctx.globalAlpha = Math.min(1, toastT); ctx.fillStyle = '#1b2a1e'; ctx.fillRect(10, oy + bw + cs * (FRAME + 0.15) + 28, W - 20, 30); ctx.fillStyle = '#7dff9a'; ctx.font = 'bold 14px system-ui'; ctx.fillText(toast, 20, oy + bw + cs * (FRAME + 0.15) + 48); ctx.globalAlpha = 1; }
   if (flash > 0) { ctx.fillStyle = `rgba(255,220,120,${Math.min(1, flash) * 0.35})`; ctx.fillRect(0, 0, W, H); }
 }
 let last = performance.now();

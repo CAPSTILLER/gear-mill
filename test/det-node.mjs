@@ -10,6 +10,10 @@ globalThis.document = { getElementById: () => el(), createElement: () => el(), q
 globalThis.localStorage = { getItem: () => null, setItem() {} };
 globalThis.requestAnimationFrame = () => 0; globalThis.cancelAnimationFrame = () => {};
 await import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'));
-const { seed, ticks, log } = JSON.parse(readFileSync(process.argv[2] || 'test/det-fixture.json', 'utf8'));
+const file = process.argv[2] || 'test/det-fixture.json';
+const { seed, ticks, log } = JSON.parse(readFileSync(file, 'utf8'));
+const expected = JSON.parse(readFileSync('test/det-expected.json', 'utf8'))[file];
 const a = window.__det.replay(seed, log, ticks), b = window.__det.replay(seed, log, ticks);
-console.log(JSON.stringify({ runA: a, runB: b, identical: a.hash === b.hash && a.score === b.score }));
+const ok = a.hash === b.hash && a.score === b.score && (!expected || a.hash === expected);
+console.log(JSON.stringify({ file, runA: a, runB: b, expected, ok }));
+if (!ok) process.exit(1);
