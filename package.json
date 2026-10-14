@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:det": "node test/det-node.mjs && node test/det-node.mjs test/det-fixture-long.json"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

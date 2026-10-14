@@ -27,7 +27,17 @@ function buyHole() {
 let detached = 0, anteLeft = 0, queue = 0, bin = 0, credit = 0, spawned = 0, lost = 0, reclaims = 0, nextId = 1;
 let spawnT = 0, score = 0, time = 0, over = false, won = false, playing = false, flash = 0, wmAng = 0, millAng = 0, millSpin = 0, toast = '', toastT = 0;
 let best = +(localStorage.getItem('gearmill.best') || 0);
-const rnd = (a: number, b: number) => a + Math.random() * (b - a);
+// ---- deterministic mode ("DET"): seeded PRNG, fixed 64 Hz tick, input log ----
+// TICK = 1/64 s is exactly representable in binary floating point, so every timer that is decremented/incremented by TICK
+// (clock, hole gears, sweep, lever cooldown, power hold, sag grace...) stays an exact multiple of one tick: effectively an integer tick count.
+const TICK = 1 / 64;
+let det = false, rngState = 1, tick = 0, acc = 0, viewK = 1, detSeed = 0;
+type Act = { a: 'pin' | 'post'; r: number; c: number } | { a: 'lever'; sd: 'T' | 'B' } | { a: 'hole' };
+type LogEv = { t: number } & Act;
+let inputLog: LogEv[] = [], pending: Act[] = [];
+function mulberry32() { rngState = (rngState + 0x6D2B79F5) >>> 0; let t = rngState; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }
+const RAND = () => det ? mulberry32() : Math.random();
+const rnd = (a: number, b: number) => a + RAND() * (b - a);
 const ri = (a: number, b: number) => Math.floor(rnd(a, b + 1));
 const inG = (r: number, c: number) => r >= 0 && c >= 0 && r < N && c < N;
 const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -38,8 +48,10 @@ const angDiff = (a: number, b: number) => { let d = (a - b) % (Math.PI * 2); if 
 
 function resize() {
   dpr = window.devicePixelRatio || 1;
-  W = Math.min(window.innerWidth, 520); H = window.innerHeight;
-  cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  if (det) { // fixed logical board so physics is identical on every screen; scaled for display only
+    W = 412; H = 860; viewK = Math.min(window.innerWidth / W, window.innerHeight / H) || 1;
+  } else { W = Math.min(window.innerWidth, 520); H = window.innerHeight; viewK = 1; }
+  cv.width = W * dpr * viewK; cv.height = H * dpr * viewK; cv.style.width = W * viewK + 'px'; cv.style.height = H * viewK + 'px';
   cs = Math.min((W - 16) / (N + 1), (H - 210) / (N + 1));
   ox = (W - cs * N) / 2; rackY = 100; oy = rackY + cs * 1.3;
 }
@@ -77,8 +89,9 @@ function freeSquare(avoid: (r: number, c: number) => boolean) {
   for (let t = 0; t < 200; t++) { const r = ri(0, N - 1), c = ri(0, N - 1); if (!locked(r, c) && !seatAt(r, c) && !avoid(r, c)) return { r, c }; }
   return null;
 }
-function addWindmill(r: number, c: number) { wms.push({ r, c, upperDone: false, born: time, dir: Math.random() < 0.5 ? 1 : -1 }); pins[r][c] = true; }
+function addWindmill(r: number, c: number) { wms.push({ r, c, upperDone: false, born: time, dir: RAND() < 0.5 ? 1 : -1 }); pins[r][c] = true; }
 function reset() {
+  nextId = 1; sparks = []; detached = 0; postDir = new Map(); jamLinks = []; jamSides = new Set(); wmAng = 0; postAng = 0; millAng = 0;
   flip = Array.from({ length: N }, () => Array(N).fill(false)); sweeps = [];
   pins = Array.from({ length: N }, () => Array(N).fill(false));
   edge = new Map(edgeKeys().map(([r, c]) => [r + ',' + c, true]));
@@ -135,23 +148,37 @@ function rowToggle(sd: 'T' | 'B') {
   const r = sd === 'T' ? -1 : N; for (let c = 0; c < N; c++) setEdge(r, c, !edge.get(K(r, c)));
   return true;
 }
-function tap(px: number, py: number) {
-  if (!playing || over) return;
-  for (const sd of ['T', 'B'] as const) { const b = rowBtn(sd); if (Math.hypot(px - b.x, py - b.y) < cs * 0.62 && Math.abs(px - b.x) < cs * 0.62) { rowToggle(sd); return; } }
+function resolveTap(px: number, py: number): Act | null {
+  for (const sd of ['T', 'B'] as const) { const b = rowBtn(sd); if (Math.hypot(px - b.x, py - b.y) < cs * 0.62 && Math.abs(px - b.x) < cs * 0.62) return { a: 'lever', sd }; }
   const fx = (px - ox) / cs, fy = (py - oy) / cs;
   const c = Math.floor(fx), r = Math.floor(fy);
-  if (inG(r, c)) { if (locked(r, c)) return; pins[r][c] = !pins[r][c]; if (!pins[r][c]) releaseSeat(r, c); return; }
-  // border post: nearest edge post within ~0.6 cell
+  if (inG(r, c)) return locked(r, c) ? null : { a: 'pin', r, c };
   let bestK: [number, number] | null = null, bd = cs * 0.6;
   for (const [er, ec] of edgeKeys()) { const d = Math.hypot(px - ex(ec), py - ey(er)); if (d < bd) { bd = d; bestK = [er, ec]; } }
-  if (bestK) { const k = bestK.join(','); if (seatAt(bestK[0], bestK[1])) { releaseSeat(bestK[0], bestK[1]); return; } setEdge(bestK[0], bestK[1], !edge.get(k)); }
+  return bestK ? { a: 'post', r: bestK[0], c: bestK[1] } : null;
 }
-cv.addEventListener('pointerdown', e => { const b = cv.getBoundingClientRect(); tap(e.clientX - b.left, e.clientY - b.top); });
+function applyAct(x: Act) {
+  if (!playing || over) return;
+  if (x.a === 'lever') rowToggle(x.sd);
+  else if (x.a === 'hole') buyHole();
+  else if (x.a === 'pin') { const { r, c } = x; if (locked(r, c)) return; pins[r][c] = !pins[r][c]; if (!pins[r][c]) releaseSeat(r, c); }
+  else { const { r, c } = x; if (seatAt(r, c)) { releaseSeat(r, c); return; } setEdge(r, c, !edge.get(K(r, c))); }
+}
+function input(x: Act) { if (det) pending.push(x); else applyAct(x); }
+function tap(px: number, py: number) {
+  if (!playing || over) return;
+  const x = resolveTap(px, py); if (x) input(x);
+}
+function detTick() { // one fixed simulation tick: apply this tick's inputs, then step
+  for (const x of pending) { inputLog.push({ t: tick, ...x } as LogEv); applyAct(x); }
+  pending = []; step(TICK); tick++;
+}
+cv.addEventListener('pointerdown', e => { const b = cv.getBoundingClientRect(); tap((e.clientX - b.left) / viewK, (e.clientY - b.top) / viewK); });
 
 function spawn() {
   if (anteLeft > 0) anteLeft--; else queue--;
-  const left = Math.random() < 0.5;
-  gears.push({ id: nextId++, x: left ? -cs : W + cs, y: rackY, vx: 0, vy: 0, ang: 0, va: 0, power: Math.random() < 0.13, phase: 'rack', dir: left ? 1 : -1, dropX: rnd(ox + cs * 0.4, ox + cs * (N - 0.4)), stuck: 0, earned: false });
+  const left = RAND() < 0.5;
+  gears.push({ id: nextId++, x: left ? -cs : W + cs, y: rackY, vx: 0, vy: 0, ang: 0, va: 0, power: RAND() < 0.13, phase: 'rack', dir: left ? 1 : -1, dropX: rnd(ox + cs * 0.4, ox + cs * (N - 0.4)), stuck: 0, earned: false });
   spawned++;
 }
 
@@ -239,8 +266,8 @@ function step(dt: number) {
   for (const k of sparks) { k.t -= dt; k.x += k.vx * dt; k.y += k.vy * dt; k.vy += cs * 8 * dt; }
   sparks = sparks.filter(k => k.t > 0);
   if (dt > 0) {
-    for (const [u, v] of jamLinks) { const [r1, c1] = u.split(',').map(Number), [r2, c2] = v.split(',').map(Number); if (Math.random() < dt * 40) emit((ex(c1) + ex(c2)) / 2, (ey(r1) + ey(r2)) / 2, ri(2, 4)); }
-    for (const g of seats.values()) if (g.jam && Math.random() < dt * 6) { const a = rnd(0, 7); emit(ex(g.c) + Math.cos(a) * cs * 0.45, ey(g.r) + Math.sin(a) * cs * 0.45, ri(1, 3)); }
+    for (const [u, v] of jamLinks) { const [r1, c1] = u.split(',').map(Number), [r2, c2] = v.split(',').map(Number); if (RAND() < dt * 40) emit((ex(c1) + ex(c2)) / 2, (ey(r1) + ey(r2)) / 2, ri(2, 4)); }
+    for (const g of seats.values()) if (g.jam && RAND() < dt * 6) { const a = rnd(0, 7); emit(ex(g.c) + Math.cos(a) * cs * 0.45, ey(g.r) + Math.sin(a) * cs * 0.45, ri(1, 3)); }
   } toastT = Math.max(0, toastT - dt);
   if (!playing) return;
   if (over) { millAng += dt * millSpin; flash = Math.max(0, flash - dt); return; }
@@ -329,7 +356,7 @@ function step(dt: number) {
     }
     }
     if (caught) continue;
-    if (Math.hypot(gr.vx, gr.vy) < cs * 0.8) { gr.stuck += dt; if (gr.stuck > 0.6) { gr.vx += (Math.sign(gr.vx) || (Math.random() < 0.5 ? -1 : 1)) * cs * 3; gr.stuck = 0.3; } if (gr.stuck > (onBlock ? 6 : 3)) { gr.dead = true; lost++; bin++; continue; } }
+    if (Math.hypot(gr.vx, gr.vy) < cs * 0.8) { gr.stuck += dt; if (gr.stuck > 0.6) { gr.vx += (Math.sign(gr.vx) || (RAND() < 0.5 ? -1 : 1)) * cs * 3; gr.stuck = 0.3; } if (gr.stuck > (onBlock ? 6 : 3)) { gr.dead = true; lost++; bin++; continue; } }
     else gr.stuck = Math.max(0, gr.stuck - dt);
     if (gr.y > oy + N * cs + cs * 1.1) { gr.dead = true; lost++; bin++; }
   }
@@ -393,9 +420,10 @@ function drawGear(x: number, y: number, ang: number, pw: boolean, on: boolean, h
   if (hold > 0) { ctx.strokeStyle = '#5fe0ff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, R * 1.05, -Math.PI / 2, -Math.PI / 2 + (hold / POWER_HOLD) * Math.PI * 2); ctx.stroke(); }
 }
 function draw() {
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.setTransform(dpr * viewK, 0, 0, dpr * viewK, 0, 0);
   ctx.fillStyle = '#0b0d10'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = '#f0b44c'; ctx.font = 'bold 18px system-ui'; ctx.fillText('MILL', 100, 22);
+  if (det) { ctx.fillStyle = '#50dcff'; ctx.font = 'bold 9px system-ui'; ctx.fillText('DET', W - 72, 21); ctx.font = 'bold 18px system-ui'; }
   ctx.font = '13px system-ui'; ctx.fillStyle = '#dfe6ee';
   ctx.fillText(`Score ${Math.floor(score)}`, 10, 42); ctx.fillText(`Best ${best}`, 110, 42); ctx.fillText(`Pins ${pinsUpCount()}`, 200, 42); ctx.fillText(`${time.toFixed(0)}s`, W - 40, 22);
   ctx.fillText(`Ante ${anteLeft}`, 10, 60); ctx.fillText(`Queue ${queue}`, 90, 60); ctx.fillText(`Bin ${bin}`, 180, 60);
@@ -476,7 +504,10 @@ let rafId = 0, halted = false, gamePaused = false;
 function loop(t: number) {
   if (halted) return;
   const dt = Math.min(0.05, Math.max(0, (t - last) / 1000)); last = t;
-  if (!gamePaused) step(dt);
+  if (!gamePaused) {
+    if (det) { acc = Math.min(acc + dt, 0.25); while (acc >= TICK && playing && !over) { detTick(); acc -= TICK; } if (over) step(dt); }
+    else step(dt);
+  }
   draw(); rafId = requestAnimationFrame(loop);
 }
 reset(); rafId = requestAnimationFrame(loop);
@@ -484,11 +515,11 @@ const pauseBtn = document.getElementById('pause') as HTMLButtonElement, pausedOv
 function setPaused(v: boolean) {
   if (v && (!playing || over)) v = false;
   gamePaused = v; pausedOv.classList.toggle('h', !v); pauseBtn.textContent = v ? '▶' : '⏸';
-  if (!v) last = performance.now(); // no dt jump on resume
+  if (!v) { last = performance.now(); acc = 0; } // no dt jump on resume
 }
 function pauseGame() { if (playing && !over) setPaused(true); document.querySelectorAll('audio').forEach(a => { try { a.pause(); } catch { /* ignore */ } }); }
 function haltLoop() { halted = true; cancelAnimationFrame(rafId); }
-function wakeLoop() { if (!halted) return; halted = false; last = performance.now(); rafId = requestAnimationFrame(loop); }
+function wakeLoop() { if (!halted) return; halted = false; last = performance.now(); acc = 0; rafId = requestAnimationFrame(loop); }
 pauseBtn.addEventListener('click', e => { e.stopPropagation(); setPaused(!gamePaused); });
 document.getElementById('resume')!.addEventListener('click', () => setPaused(false));
 {
@@ -502,10 +533,50 @@ document.getElementById('resume')!.addEventListener('click', () => setPaused(fal
   window.addEventListener('freeze', pauseGame);
   window.addEventListener('pageshow', () => { wakeLoop(); if (playing && !over) setPaused(true); });
 }
-const startGame = () => { setPaused(false); document.getElementById('help')!.classList.add('h'); reset(); playing = true; };
-document.getElementById('go')!.onclick = startGame; document.getElementById('hole')!.onclick = () => { buyHole(); }; document.getElementById('go2')!.onclick = startGame;
+function beginDet(seed: number) { det = true; detSeed = seed >>> 0; rngState = detSeed; tick = 0; acc = 0; inputLog = []; pending = []; resize(); reset(); playing = true; }
+const startGame = () => { setPaused(false); document.getElementById('help')!.classList.add('h'); det = false; resize(); reset(); playing = true; };
+const startDet = () => { setPaused(false); document.getElementById('help')!.classList.add('h'); beginDet((Date.now() ^ (Math.random() * 4294967296)) >>> 0); last = performance.now(); };
+// state hash (FNV-1a over a canonical JSON of the sim state)
+function stateHash() {
+  const st = JSON.stringify([tick, score, time, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, holeT, sweepNext, sweep, rowCd, lever,
+    pins, [...edge], flip, [...seats.values()].map(t => [t.r, t.c, t.id, t.ang, t.lvl, t.on, t.dir, t.jam, t.hold, t.age]),
+    gears.map(g => [g.id, g.x, g.y, g.vx, g.vy, g.ang, g.va, g.phase, g.stuck]), wms, mill, rngState]);
+  let h = 0x811c9dc5; for (let i = 0; i < st.length; i++) { h ^= st.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, '0');
+}
+// headless replay: same seed + input log -> same state
+function replay(seed: number, log: LogEv[], ticks: number) {
+  beginDet(seed); let i = 0; const sorted = [...log].sort((a, b) => a.t - b.t);
+  for (let k = 0; k < ticks && !over; k++) { while (i < sorted.length && sorted[i].t === tick) { const { t: _t, ...x } = sorted[i++]; pending.push(x as Act); } detTick(); }
+  const out = { hash: stateHash(), score, tick, over, won, spawned, lost };
+  inputLog = sorted; return out;
+}
+document.getElementById('go')!.onclick = startGame; document.getElementById('hole')!.onclick = () => { input({ a: 'hole' }); }; document.getElementById('go2')!.onclick = startGame;
 document.getElementById('again')!.onclick = () => { setPaused(false); document.getElementById('over')!.classList.add('h'); reset(); playing = true; };
+// hidden entry: long-press PLAY for 3 s -> deterministic build
+for (const id of ['go', 'go2']) {
+  const btn = document.getElementById(id) as HTMLButtonElement;
+  let t0 = 0, timer = 0, raf = 0, suppress = false;
+  const ring = document.createElement('span'); ring.className = 'lp'; btn.appendChild(ring);
+  const clear = () => { clearTimeout(timer); cancelAnimationFrame(raf); ring.style.opacity = '0'; t0 = 0; };
+  const anim = () => { if (!t0) return; const e = performance.now() - t0; if (e > 500) { ring.style.opacity = '1'; ring.style.setProperty('--p', String(Math.min(1, (e - 500) / 2500))); } raf = requestAnimationFrame(anim); };
+  btn.addEventListener('contextmenu', e => e.preventDefault());
+  const begin = () => { suppress = false; t0 = performance.now(); anim(); timer = window.setTimeout(() => { clear(); fired = true; startDet(); }, 3000); };
+  let fired = false;
+  // touch: own the gesture (no context menu / text select / synthetic click); short tap still plays the normal game
+  btn.addEventListener('touchstart', e => { e.preventDefault(); fired = false; begin(); }, { passive: false });
+  btn.addEventListener('touchend', e => { e.preventDefault(); const held = t0 ? performance.now() - t0 : 0; clear(); if (!fired && held < 500) btn.click(); fired = false; }, { passive: false });
+  btn.addEventListener('touchcancel', () => clear());
+  // mouse
+  btn.addEventListener('mousedown', () => { fired = false; begin(); });
+  btn.addEventListener('mouseup', () => { if (t0 && performance.now() - t0 > 500) suppress = true; clear(); });
+  btn.addEventListener('mouseleave', () => clear());
+  btn.addEventListener('click', e => { if (suppress) { e.preventDefault(); e.stopImmediatePropagation(); suppress = false; } }, true);
+}
 if (import.meta.env.DEV) {
+  (window as any).__det = { replay, stateHash, beginDet, input, get log() { return inputLog; }, get seed() { return detSeed; }, get tick() { return tick; }, get det() { return det; },
+    exportLog() { return JSON.stringify({ seed: detSeed, ticks: tick, log: inputLog }); },
+    resolveTap: (x: number, y: number) => resolveTap(x, y) };
   (window as any).__gm = {
     tap, raised, pinUp,
     seat(r: number, c: number, pw = false, ang = Math.PI / 2) { if (inG(r, c)) pins[r][c] = true; else edge.set(K(r, c), true); seats.set(K(r, c), { r, c, age: 0, ang, id: nextId++, power: pw, hold: 0, on: false, srcConn: false, earned: false, dir: 0, jam: false, lvl: inG(r, c) && raised(r, c) ? 1 : 0 }); },
