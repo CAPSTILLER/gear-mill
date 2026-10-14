@@ -85,11 +85,11 @@ function reset() {
   seats = new Map();
   gears = []; wms = [];
   anteLeft = ANTE; queue = 0; bin = 0; credit = 0; spawned = lost = reclaims = 0;
-  rowCd = { T: 0, B: 0 }; holeT = 0; sweepNext = SWEEP_EVERY; sweep = null; sweepPost = '';
+  rowCd = { T: 0, B: 0 }; lever = { T: 0, B: 0 }; leverAnim = { T: 0, B: 0 }; holeT = 0; sweepNext = SWEEP_EVERY; sweep = null; sweepPost = '';
   spawnT = 0; score = 0; time = 0; over = won = false; flash = 0; millSpin = 0; toast = ''; toastT = 0;
-  const d = { r: ri(0, 1), c: ri(0, N - 1) };
+  const d = { r: ri(N - 2, N - 1), c: ri(0, N - 1) }; // v9: windmill starts at the bottom
   addWindmill(d.r, d.c);
-  mill = { r: ri(N - 2, N - 1), c: d.c < N / 2 ? ri(N / 2, N - 1) : ri(0, N / 2 - 1) };
+  mill = { r: ri(0, 1), c: d.c < N / 2 ? ri(N / 2, N - 1) : ri(0, N / 2 - 1) };
   pins[mill.r][mill.c] = true;
 }
 function say(t: string) { toast = t; toastT = 2.5; }
@@ -129,8 +129,9 @@ function separateLoose() {
 // row buttons: arrows in the top-left / bottom-left board corners toggle that whole border row
 const ROW_CD = 1.0; let rowCd = { T: 0, B: 0 } as Record<'T' | 'B', number>;
 const rowBtn = (sd: 'T' | 'B') => ({ x: ox - cs * 0.42, y: sd === 'T' ? oy - cs * 0.42 : oy + N * cs + cs * 0.42 });
+let lever = { T: 0, B: 0 } as Record<'T' | 'B', number>, leverAnim = { T: 0, B: 0 } as Record<'T' | 'B', number>;
 function rowToggle(sd: 'T' | 'B') {
-  if (rowCd[sd] > 0) return false; rowCd[sd] = ROW_CD;
+  if (rowCd[sd] > 0) return false; rowCd[sd] = ROW_CD; lever[sd] = 1 - lever[sd];
   const r = sd === 'T' ? -1 : N; for (let c = 0; c < N; c++) setEdge(r, c, !edge.get(K(r, c)));
   return true;
 }
@@ -233,6 +234,7 @@ let paused = false, testQuiet = false;
 function step(dt: number) {
   if (paused) dt = 0;
   wmAng += dt * 2; postAng += dt * 2; rowCd.T = Math.max(0, rowCd.T - dt); rowCd.B = Math.max(0, rowCd.B - dt);
+  for (const sd of ['T', 'B'] as const) { const tgt = lever[sd], d = tgt - leverAnim[sd]; leverAnim[sd] += Math.sign(d) * Math.min(Math.abs(d), dt * 6); }
   for (const w of sweeps) w.t += dt; sweeps = sweeps.filter(w => w.t < 0.8);
   for (const k of sparks) { k.t -= dt; k.x += k.vx * dt; k.y += k.vy * dt; k.vy += cs * 8 * dt; }
   sparks = sparks.filter(k => k.t > 0);
@@ -299,6 +301,19 @@ function step(dt: number) {
       const vn = gr.vx * nx + gr.vy * ny;
       if (vn < 0) { const tx = -ny, ty = nx; let vt = gr.vx * tx + gr.vy * ty; const vnn = -vn * (Math.abs(vn) > cs * 1.5 ? 0.45 : 0); vt *= 0.985;
         gr.vx = nx * vnn + tx * vt; gr.vy = ny * vnn + ty * vt; gr.va = vt / R; }
+      if (ny < -0.5) onBlock = true;
+    }
+    // corner lever housings are solid blocks
+    for (const sd of ['T', 'B'] as const) {
+      const rad = cs * 0.08, x0 = ox - cs * 0.75 + rad, x1 = ox - cs * 0.04 - rad;
+      const y0 = (sd === 'T' ? oy - cs * 0.75 : oy + N * cs + cs * 0.04) + rad, y1 = (sd === 'T' ? oy - cs * 0.04 : oy + N * cs + cs * 0.75) - rad;
+      const qx = Math.max(x0, Math.min(x1, gr.x)), qy = Math.max(y0, Math.min(y1, gr.y));
+      const dx = gr.x - qx, dy = gr.y - qy, d = Math.hypot(dx, dy);
+      let nx = 1, ny = 0;
+      if (d > 1e-6) { if (d >= R + rad) continue; nx = dx / d; ny = dy / d; gr.x = qx + nx * (R + rad); gr.y = qy + ny * (R + rad); }
+      else gr.x = x1 + R + rad;
+      const vn = gr.vx * nx + gr.vy * ny;
+      if (vn < 0) { const tx = -ny, ty = nx, vt = (gr.vx * tx + gr.vy * ty) * 0.985, vnn = -vn * 0.45; gr.vx = nx * vnn + tx * vt; gr.vy = ny * vnn + ty * vt; gr.va = vt / R; }
       if (ny < -0.5) onBlock = true;
     }
     const col: [number, number, number][] = [];
@@ -429,10 +444,20 @@ function draw() {
   for (const k of sparks) { ctx.strokeStyle = k.col; ctx.lineWidth = 3; ctx.shadowColor = "#ffb000"; ctx.shadowBlur = 6; ctx.beginPath(); ctx.moveTo(k.x, k.y); ctx.lineTo(k.x - k.vx * 0.05, k.y - k.vy * 0.05); ctx.stroke(); } ctx.shadowBlur = 0;
   if (sweepPost) { const [r, c] = sweepPost.split(',').map(Number); const a = 0.5 + 0.5 * Math.sin(performance.now() / 90);
     ctx.fillStyle = `rgba(80,220,255,${0.35 + 0.4 * a})`; ctx.beginPath(); ctx.arc(ex(c), ey(r), cs * 0.32, 0, 7); ctx.fill(); }
-  for (const sd of ['T', 'B'] as const) { const b = rowBtn(sd), rd = cs * 0.36, cd = rowCd[sd] / ROW_CD;
-    ctx.fillStyle = cd > 0 ? '#2a3038' : '#50dcff'; ctx.beginPath(); ctx.arc(b.x, b.y, rd, 0, 7); ctx.fill();
-    if (cd > 0) { ctx.strokeStyle = '#50dcff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(b.x, b.y, rd, -Math.PI / 2, -Math.PI / 2 + (1 - cd) * Math.PI * 2); ctx.stroke(); }
-    ctx.fillStyle = cd > 0 ? '#6b7585' : '#0b0d10'; ctx.beginPath(); ctx.moveTo(b.x + rd * 0.55, b.y); ctx.lineTo(b.x - rd * 0.35, b.y - rd * 0.5); ctx.lineTo(b.x - rd * 0.35, b.y + rd * 0.5); ctx.closePath(); ctx.fill(); }
+  for (const sd of ['T', 'B'] as const) {
+    const b = rowBtn(sd), cd = rowCd[sd] / ROW_CD, x0 = ox - cs * 0.75, w = cs * 0.71, y0 = sd === 'T' ? oy - cs * 0.75 : oy + N * cs + cs * 0.04;
+    // housing block
+    const hg = ctx.createLinearGradient(0, y0, 0, y0 + w); hg.addColorStop(0, '#5a6372'); hg.addColorStop(1, '#2a3038');
+    ctx.fillStyle = hg; ctx.fillRect(x0, y0, w, w); ctx.strokeStyle = '#7d8aa0'; ctx.lineWidth = 1; ctx.strokeRect(x0 + 0.5, y0 + 0.5, w - 1, w - 1);
+    // slot + handle: pivot near bottom, swings left (-) to right (+)
+    const px = b.x, py = y0 + w * 0.78, ang = (-0.75 + 1.5 * leverAnim[sd]), L = w * 0.62;
+    ctx.fillStyle = '#111'; ctx.fillRect(px - w * 0.36, py - 2, w * 0.72, 4);
+    const hx = px + Math.sin(ang) * L, hy = py - Math.cos(ang) * L;
+    ctx.strokeStyle = '#c9ced6'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(hx, hy); ctx.stroke();
+    ctx.fillStyle = cd > 0 ? '#6b7585' : '#ff4a3a'; ctx.beginPath(); ctx.arc(hx, hy, w * 0.13, 0, 7); ctx.fill();
+    ctx.fillStyle = '#20262e'; ctx.beginPath(); ctx.arc(px, py, 3, 0, 7); ctx.fill();
+    if (cd > 0) { ctx.strokeStyle = '#50dcff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x0 + 2, y0 + w - 2); ctx.lineTo(x0 + 2 + (w - 4) * (1 - cd), y0 + w - 2); ctx.stroke(); }
+  }
   // pair cue: one post of a pair down -> pulse its partner as the target
   for (const [er, ec] of edgeKeys()) if (postDown(er, ec)) { const [pr, pc] = partner(er, ec); if (!postDown(pr, pc)) {
     const a = 0.5 + 0.5 * Math.sin(performance.now() / 150);
@@ -459,7 +484,7 @@ if (import.meta.env.DEV) {
     drop(x: number, y: number, ang: number, vx = 0, vy = 0) { gears.push({ id: nextId++, x, y, vx, vy, ang, va: 0, power: false, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: false }); },
     pause(v: boolean) { paused = v; }, quiet(v: boolean) { testQuiet = v; }, ex, ey, supported,
     setPin(r: number, c: number, v: boolean) { if (inG(r, c)) pins[r][c] = v; else setEdge(r, c, v); },
-    addBin(n: number) { bin += n; }, rowBtn, overlaps() { const L: string[] = []; const all = [...gears.map(g => [g.x, g.y]), ...[...seats.values()].map(t => [ex(t.c), ey(t.r)]), ...wms.map(w => [cx(w.c), cy(w.r)]), [cx(mill.c), cy(mill.r)]]; for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) { const d = Math.hypot(all[i][0] - all[j][0], all[i][1] - all[j][1]); if (d < cs * 0.8) L.push((d / cs).toFixed(2)); } return L; }, buyHole, setTime(t: number) { time = t; }, setHole(t: number) { holeT = t; }, setQueue(n: number) { queue = n; }, setCredit(n: number) { credit = n; }, order: sweepOrder, edgeUp(r: number, c: number) { return edge.get(K(r, c)); }, flipAt(r: number, c: number) { return flip[r][c]; }, gearsInfo() { return gears.map(g => ({ x: g.x, y: g.y, vx: g.vx, vy: g.vy, phase: g.phase })); }, flipRow(r: number) { for (let c = 0; c < N; c++) flip[r][c] = !flip[r][c]; }, flipCell(r: number, c: number) { flip[r][c] = !flip[r][c]; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
+    addBin(n: number) { bin += n; }, lever: () => ({ ...lever }), leverAnim: () => ({ ...leverAnim }), rowBtn, overlaps() { const L: string[] = []; const all = [...gears.map(g => [g.x, g.y]), ...[...seats.values()].map(t => [ex(t.c), ey(t.r)]), ...wms.map(w => [cx(w.c), cy(w.r)]), [cx(mill.c), cy(mill.r)]]; for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) { const d = Math.hypot(all[i][0] - all[j][0], all[i][1] - all[j][1]); if (d < cs * 0.8) L.push((d / cs).toFixed(2)); } return L; }, buyHole, setTime(t: number) { time = t; }, setHole(t: number) { holeT = t; }, setQueue(n: number) { queue = n; }, setCredit(n: number) { credit = n; }, order: sweepOrder, edgeUp(r: number, c: number) { return edge.get(K(r, c)); }, flipAt(r: number, c: number) { return flip[r][c]; }, gearsInfo() { return gears.map(g => ({ x: g.x, y: g.y, vx: g.vx, vy: g.vy, phase: g.phase })); }, flipRow(r: number) { for (let c = 0; c < N; c++) flip[r][c] = !flip[r][c]; }, flipCell(r: number, c: number) { flip[r][c] = !flip[r][c]; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
     get state() { return { flash, holeT, sweep: sweep && { ...sweep }, sweepPost, sweepNext, time, score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, postDir: Object.fromEntries(postDir), jamSides: [...jamSides], jamLinks, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang, dir: s.dir, jam: s.jam })) }; },
   };
 }
