@@ -472,21 +472,39 @@ function draw() {
   if (flash > 0) { ctx.fillStyle = `rgba(255,220,120,${Math.min(1, flash) * 0.35})`; ctx.fillRect(0, 0, W, H); }
 }
 let last = performance.now();
-let rafId = 0, halted = false;
-function loop(t: number) { if (halted) return; const dt = Math.min(0.05, (t - last) / 1000); last = t; step(dt); draw(); rafId = requestAnimationFrame(loop); }
+let rafId = 0, halted = false, gamePaused = false;
+function loop(t: number) {
+  if (halted) return;
+  const dt = Math.min(0.05, Math.max(0, (t - last) / 1000)); last = t;
+  if (!gamePaused) step(dt);
+  draw(); rafId = requestAnimationFrame(loop);
+}
 reset(); rafId = requestAnimationFrame(loop);
-// header logo: stop the game cleanly, then navigate in the same tab
-function haltGame() { halted = true; playing = false; cancelAnimationFrame(rafId); document.querySelectorAll('audio').forEach(a => { try { a.pause(); } catch { /* ignore */ } }); }
+const pauseBtn = document.getElementById('pause') as HTMLButtonElement, pausedOv = document.getElementById('paused')!;
+function setPaused(v: boolean) {
+  if (v && (!playing || over)) v = false;
+  gamePaused = v; pausedOv.classList.toggle('h', !v); pauseBtn.textContent = v ? '▶' : '⏸';
+  if (!v) last = performance.now(); // no dt jump on resume
+}
+function pauseGame() { if (playing && !over) setPaused(true); document.querySelectorAll('audio').forEach(a => { try { a.pause(); } catch { /* ignore */ } }); }
+function haltLoop() { halted = true; cancelAnimationFrame(rafId); }
+function wakeLoop() { if (!halted) return; halted = false; last = performance.now(); rafId = requestAnimationFrame(loop); }
+pauseBtn.addEventListener('click', e => { e.stopPropagation(); setPaused(!gamePaused); });
+document.getElementById('resume')!.addEventListener('click', () => setPaused(false));
 {
   const logo = document.getElementById('logo') as HTMLAnchorElement;
   const stop = (e: Event) => e.stopPropagation();
-  for (const ev of ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'mousedown']) logo.addEventListener(ev, stop);
-  logo.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); haltGame(); location.href = logo.href; });
-  window.addEventListener('pagehide', haltGame);
+  for (const ev of ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'mousedown']) { logo.addEventListener(ev, stop); pauseBtn.addEventListener(ev, stop); }
+  logo.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); pauseGame(); haltLoop(); location.href = logo.href; });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') pauseGame(); else wakeLoop(); });
+  window.addEventListener('pagehide', () => { pauseGame(); haltLoop(); });
+  window.addEventListener('blur', pauseGame);
+  window.addEventListener('freeze', pauseGame);
+  window.addEventListener('pageshow', () => { wakeLoop(); if (playing && !over) setPaused(true); });
 }
-const startGame = () => { document.getElementById('help')!.classList.add('h'); reset(); playing = true; };
+const startGame = () => { setPaused(false); document.getElementById('help')!.classList.add('h'); reset(); playing = true; };
 document.getElementById('go')!.onclick = startGame; document.getElementById('hole')!.onclick = () => { buyHole(); }; document.getElementById('go2')!.onclick = startGame;
-document.getElementById('again')!.onclick = () => { document.getElementById('over')!.classList.add('h'); reset(); playing = true; };
+document.getElementById('again')!.onclick = () => { setPaused(false); document.getElementById('over')!.classList.add('h'); reset(); playing = true; };
 if (import.meta.env.DEV) {
   (window as any).__gm = {
     tap, raised, pinUp,
@@ -494,7 +512,7 @@ if (import.meta.env.DEV) {
     drop(x: number, y: number, ang: number, vx = 0, vy = 0) { gears.push({ id: nextId++, x, y, vx, vy, ang, va: 0, power: false, phase: 'fall', dir: 0, dropX: 0, stuck: 0, earned: false }); },
     pause(v: boolean) { paused = v; }, quiet(v: boolean) { testQuiet = v; }, ex, ey, supported,
     setPin(r: number, c: number, v: boolean) { if (inG(r, c)) pins[r][c] = v; else setEdge(r, c, v); },
-    addBin(n: number) { bin += n; }, lever: () => ({ ...lever }), leverAnim: () => ({ ...leverAnim }), rowBtn, overlaps() { const L: string[] = []; const all = [...gears.map(g => [g.x, g.y]), ...[...seats.values()].map(t => [ex(t.c), ey(t.r)]), ...wms.map(w => [cx(w.c), cy(w.r)]), [cx(mill.c), cy(mill.r)]]; for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) { const d = Math.hypot(all[i][0] - all[j][0], all[i][1] - all[j][1]); if (d < cs * 0.8) L.push((d / cs).toFixed(2)); } return L; }, buyHole, setTime(t: number) { time = t; }, setHole(t: number) { holeT = t; }, setQueue(n: number) { queue = n; }, setCredit(n: number) { credit = n; }, order: sweepOrder, edgeUp(r: number, c: number) { return edge.get(K(r, c)); }, flipAt(r: number, c: number) { return flip[r][c]; }, gearsInfo() { return gears.map(g => ({ x: g.x, y: g.y, vx: g.vx, vy: g.vy, phase: g.phase })); }, flipRow(r: number) { for (let c = 0; c < N; c++) flip[r][c] = !flip[r][c]; }, flipCell(r: number, c: number) { flip[r][c] = !flip[r][c]; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
+    addBin(n: number) { bin += n; }, isPaused: () => gamePaused, timers: () => ({ time, holeT, rowCdT: rowCd.T, sweepNext, halted }), lever: () => ({ ...lever }), leverAnim: () => ({ ...leverAnim }), rowBtn, overlaps() { const L: string[] = []; const all = [...gears.map(g => [g.x, g.y]), ...[...seats.values()].map(t => [ex(t.c), ey(t.r)]), ...wms.map(w => [cx(w.c), cy(w.r)]), [cx(mill.c), cy(mill.r)]]; for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) { const d = Math.hypot(all[i][0] - all[j][0], all[i][1] - all[j][1]); if (d < cs * 0.8) L.push((d / cs).toFixed(2)); } return L; }, buyHole, setTime(t: number) { time = t; }, setHole(t: number) { holeT = t; }, setQueue(n: number) { queue = n; }, setCredit(n: number) { credit = n; }, order: sweepOrder, edgeUp(r: number, c: number) { return edge.get(K(r, c)); }, flipAt(r: number, c: number) { return flip[r][c]; }, gearsInfo() { return gears.map(g => ({ x: g.x, y: g.y, vx: g.vx, vy: g.vy, phase: g.phase })); }, flipRow(r: number) { for (let c = 0; c < N; c++) flip[r][c] = !flip[r][c]; }, flipCell(r: number, c: number) { flip[r][c] = !flip[r][c]; }, setWmDir(i: number, d: number) { wms[i].dir = d; }, addWm(r: number, c: number) { addWindmill(r, c); }, release(r: number, c: number) { releaseSeat(r, c); },
     get state() { return { flash, holeT, sweep: sweep && { ...sweep }, sweepPost, sweepNext, time, score, anteLeft, queue, bin, credit, spawned, lost, over, won, reclaims, wms: wms.map(w => ({ ...w })), mill, ox, oy, cs, detached, falling: gears.length, postDir: Object.fromEntries(postDir), jamSides: [...jamSides], jamLinks, seats: [...seats.values()].map(s => ({ r: s.r, c: s.c, lvl: s.lvl, on: s.on, ang: s.ang, dir: s.dir, jam: s.jam })) }; },
   };
 }
