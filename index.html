@@ -3,7 +3,7 @@
 .ov{position:fixed;inset:0;background:rgba(5,7,10,.88);display:flex;align-items:center;justify-content:center;padding:18px;z-index:5}.ov.h{display:none}
 .card{max-width:380px;max-height:86vh;overflow-y:auto;box-sizing:border-box;background:#161b22;border:1px solid #3a4250;border-radius:12px;padding:18px;line-height:1.35;font-size:13px}.card h2{margin:0 0 8px;color:#f0b44c}
 #hole{position:fixed;top:66px;right:8px;margin:0;padding:6px 10px;font-size:12px;background:#50dcff;z-index:3}#hole:disabled{background:#3a4250;color:#8a94a4}#hole.on{background:#7dff9a;color:#111}
-button{background:#f0b44c;color:#111;border:0;border-radius:8px;padding:10px 18px;font-weight:700;font-size:15px;margin-top:10px}#logo{position:fixed;top:6px;left:8px;z-index:3;display:block;line-height:0}#logo img{height:22px;width:auto;image-rendering:pixelated}
+button{background:#f0b44c;color:#111;border:0;border-radius:8px;padding:10px 18px;font-weight:700;font-size:15px;margin-top:10px}#logo{position:fixed;top:2px;left:4px;padding:4px;z-index:20;touch-action:manipulation;pointer-events:auto;display:block;line-height:0}#logo img{height:22px;width:auto;image-rendering:pixelated}
 </style>    <link rel="manifest" href="/manifest.webmanifest">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="32x32" href="https://gearmill.gearup.wtf/favicon-32.png">
@@ -20,7 +20,7 @@ button{background:#f0b44c;color:#111;border:0;border-radius:8px;padding:10px 18p
     <meta name="twitter:image" content="https://gearmill.gearup.wtf/og.jpg">
     <link rel="icon" href="https://gearmill.gearup.wtf/favicon.ico" sizes="any">
 </head>
-<body><a id="logo" href="https://gearup.wtf" aria-label="GEAR home"><img src="/gear-logo-cutout.svg" alt="GEAR"></a><canvas id="c"></canvas><button id="hole" disabled>◎ HOLE GEARS · 100</button>
+<body><a id="logo" href="https://landonthis.gearup.wtf" target="_self" aria-label="GEAR home"><img src="/gear-logo-cutout.svg" alt="GEAR"></a><canvas id="c"></canvas><button id="hole" disabled>◎ HOLE GEARS · 100</button>
 <div id="help" class="ov"><div class="card"><h2>⚙ GEAR MILL <button id="go2" style="float:right;margin:0;padding:6px 12px">PLAY</button></h2>
 <p>Link the <b>windmill</b> drive gear (it starts at the bottom) up to the <b>mill</b> (at the top) with a gear train.</p>
 <ul style="padding-left:18px;margin:6px 0">

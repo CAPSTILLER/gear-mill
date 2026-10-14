@@ -472,8 +472,18 @@ function draw() {
   if (flash > 0) { ctx.fillStyle = `rgba(255,220,120,${Math.min(1, flash) * 0.35})`; ctx.fillRect(0, 0, W, H); }
 }
 let last = performance.now();
-function loop(t: number) { const dt = Math.min(0.05, (t - last) / 1000); last = t; step(dt); draw(); requestAnimationFrame(loop); }
-reset(); requestAnimationFrame(loop);
+let rafId = 0, halted = false;
+function loop(t: number) { if (halted) return; const dt = Math.min(0.05, (t - last) / 1000); last = t; step(dt); draw(); rafId = requestAnimationFrame(loop); }
+reset(); rafId = requestAnimationFrame(loop);
+// header logo: stop the game cleanly, then navigate in the same tab
+function haltGame() { halted = true; playing = false; cancelAnimationFrame(rafId); document.querySelectorAll('audio').forEach(a => { try { a.pause(); } catch { /* ignore */ } }); }
+{
+  const logo = document.getElementById('logo') as HTMLAnchorElement;
+  const stop = (e: Event) => e.stopPropagation();
+  for (const ev of ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'mousedown']) logo.addEventListener(ev, stop);
+  logo.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); haltGame(); location.href = logo.href; });
+  window.addEventListener('pagehide', haltGame);
+}
 const startGame = () => { document.getElementById('help')!.classList.add('h'); reset(); playing = true; };
 document.getElementById('go')!.onclick = startGame; document.getElementById('hole')!.onclick = () => { buyHole(); }; document.getElementById('go2')!.onclick = startGame;
 document.getElementById('again')!.onclick = () => { document.getElementById('over')!.classList.add('h'); reset(); playing = true; };
